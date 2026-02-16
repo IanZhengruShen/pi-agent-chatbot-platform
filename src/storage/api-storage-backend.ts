@@ -1,0 +1,511 @@
+import type { StorageBackend, StorageTransaction } from "@mariozechner/pi-web-ui";
+
+export interface ApiStorageBackendOptions {
+	baseUrl: string;
+	getToken: () => string | null;
+}
+
+/**
+ * StorageBackend implementation backed by REST API calls with an optimistic
+ * in-memory cache. All reads return cached data immediately; writes update
+ * the cache first, then fire-and-forget the server sync.
+ */
+export class ApiStorageBackend implements StorageBackend {
+	private baseUrl: string;
+	private getToken: () => string | null;
+	private cache = new Map<string, Map<string, any>>();
+	private initPromise: Promise<void> | null = null;
+	private initialized = false;
+
+	/** Tracks which session IDs are known to exist on the server. */
+	private knownServerSessions = new Set<string>();
+
+	/**
+	 * Tracks the number of messages the server knows about per session,
+	 * so we can compute which messages are "new" during a set() call.
+	 */
+	private serverMessageCounts = new Map<string, number>();
+
+	constructor(options: ApiStorageBackendOptions) {
+		this.baseUrl = options.baseUrl.replace(/\/$/, "");
+		this.getToken = options.getToken;
+	}
+
+	// -----------------------------------------------------------------------
+	// Initialization
+	// -----------------------------------------------------------------------
+
+	private async init(): Promise<void> {
+		if (this.initialized) return;
+		if (this.initPromise) return this.initPromise;
+
+		this.initPromise = this._doInit();
+		return this.initPromise;
+	}
+
+	private async _doInit(): Promise<void> {
+		try {
+			const [sessionsRes, settingsRes] = await Promise.all([
+				this.apiFetch("/api/sessions"),
+				this.apiFetch("/api/settings"),
+			]);
+
+			// Populate sessions-metadata cache
+			const metadataCache = this.getStore("sessions-metadata");
+			const sessionsCache = this.getStore("sessions");
+
+			if (sessionsRes?.data?.sessions) {
+				for (const s of sessionsRes.data.sessions) {
+					this.knownServerSessions.add(s.id);
+					this.serverMessageCounts.set(s.id, s.message_count ?? 0);
+
+					metadataCache.set(s.id, {
+						id: s.id,
+						title: s.title,
+						lastModified: s.last_modified,
+						messageCount: s.message_count,
+						preview: s.preview,
+						modelId: s.model_id,
+						provider: s.provider,
+						thinkingLevel: s.thinking_level,
+					});
+				}
+			}
+
+			// Populate settings cache
+			const settingsCache = this.getStore("settings");
+			if (settingsRes?.data?.userSettings) {
+				for (const [key, value] of Object.entries(settingsRes.data.userSettings)) {
+					settingsCache.set(key, value);
+				}
+			}
+
+			this.initialized = true;
+		} catch (err) {
+			console.error("[ApiStorageBackend] init error:", err);
+			// Allow retry on next access
+			this.initPromise = null;
+			throw err;
+		}
+	}
+
+	// -----------------------------------------------------------------------
+	// Helpers
+	// -----------------------------------------------------------------------
+
+	private getStore(storeName: string): Map<string, any> {
+		let store = this.cache.get(storeName);
+		if (!store) {
+			store = new Map();
+			this.cache.set(storeName, store);
+		}
+		return store;
+	}
+
+	private async apiFetch(path: string, options?: RequestInit): Promise<any> {
+		const token = this.getToken();
+		const headers: Record<string, string> = {
+			...(options?.headers as any),
+		};
+		if (token) headers["Authorization"] = `Bearer ${token}`;
+		if (options?.body) headers["Content-Type"] = "application/json";
+
+		const res = await fetch(`${this.baseUrl}${path}`, { ...options, headers });
+		if (!res.ok) throw new Error(`API error: ${res.status}`);
+		return res.json();
+	}
+
+	/**
+	 * Fire-and-forget server sync — errors are logged but never propagated.
+	 */
+	private syncToServer(path: string, options?: RequestInit): void {
+		this.apiFetch(path, options).catch((err) => {
+			console.error("[ApiStorageBackend] background sync error:", err);
+		});
+	}
+
+	// -----------------------------------------------------------------------
+	// StorageBackend — get
+	// -----------------------------------------------------------------------
+
+	async get<T = unknown>(storeName: string, key: string): Promise<T | null> {
+		await this.init();
+
+		if (storeName === "provider-keys") return null;
+
+		// For full session data, fetch from server if not already cached
+		if (storeName === "sessions") {
+			const store = this.getStore("sessions");
+			if (store.has(key)) return store.get(key) as T;
+
+			try {
+				const [sessionRes, messagesRes] = await Promise.all([
+					this.apiFetch(`/api/sessions/${key}`),
+					this.apiFetch(`/api/sessions/${key}/messages?limit=200`),
+				]);
+
+				const session = sessionRes?.data?.session;
+				if (!session) return null;
+
+				const messages = messagesRes?.data?.messages ?? [];
+				// Messages come back DESC from server; reverse to ASC
+				messages.reverse();
+
+				const sessionData = {
+					id: session.id,
+					title: session.title,
+					modelId: session.model_id,
+					provider: session.provider,
+					thinkingLevel: session.thinking_level,
+					messages,
+					lastModified: session.last_modified,
+					messageCount: session.message_count,
+				};
+
+				store.set(key, sessionData);
+				this.knownServerSessions.add(key);
+				this.serverMessageCounts.set(key, messages.length);
+
+				return sessionData as T;
+			} catch {
+				return null;
+			}
+		}
+
+		const store = this.getStore(storeName);
+		return (store.get(key) as T) ?? null;
+	}
+
+	// -----------------------------------------------------------------------
+	// StorageBackend — set
+	// -----------------------------------------------------------------------
+
+	async set<T = unknown>(storeName: string, key: string, value: T): Promise<void> {
+		await this.init();
+
+		if (storeName === "provider-keys") return;
+
+		const store = this.getStore(storeName);
+
+		if (storeName === "sessions") {
+			const data = value as any;
+			store.set(key, data);
+
+			// Also update metadata cache
+			const metadataCache = this.getStore("sessions-metadata");
+			metadataCache.set(key, {
+				id: key,
+				title: data.title,
+				lastModified: data.lastModified ?? new Date().toISOString(),
+				messageCount: data.messages?.length ?? data.messageCount ?? 0,
+				preview: data.preview,
+				modelId: data.modelId,
+				provider: data.provider,
+				thinkingLevel: data.thinkingLevel,
+			});
+
+			if (this.knownServerSessions.has(key)) {
+				// Session exists on server — patch metadata + batch new messages
+				this.syncToServer(`/api/sessions/${key}`, {
+					method: "PATCH",
+					body: JSON.stringify({
+						title: data.title,
+						thinkingLevel: data.thinkingLevel,
+						modelId: data.modelId,
+						provider: data.provider,
+					}),
+				});
+
+				const knownCount = this.serverMessageCounts.get(key) ?? 0;
+				const allMessages = data.messages ?? [];
+				if (allMessages.length > knownCount) {
+					const newMessages = allMessages.slice(knownCount);
+					// Optimistically update count; server response confirms actual count
+					const expectedCount = allMessages.length;
+					this.serverMessageCounts.set(key, expectedCount);
+					this.apiFetch(`/api/sessions/${key}/messages/batch`, {
+						method: "POST",
+						body: JSON.stringify({
+							messages: newMessages.map((m: any) => ({
+								role: m.role,
+								content: m.content,
+								stopReason: m.stopReason ?? m.stop_reason,
+								usage: m.usage,
+							})),
+						}),
+					})
+						.then((res) => {
+							// Update count from server to stay in sync
+							if (res?.data?.messages) {
+								this.serverMessageCounts.set(key, knownCount + res.data.messages.length);
+							}
+						})
+						.catch((err) => {
+							// Rollback count on failure so retry sends the same messages
+							console.error("[ApiStorageBackend] batch sync failed:", err);
+							this.serverMessageCounts.set(key, knownCount);
+						});
+				}
+			} else {
+				// New session — create on server
+				this.knownServerSessions.add(key);
+				const allMessages = data.messages ?? [];
+				this.serverMessageCounts.set(key, allMessages.length);
+
+				this.apiFetch("/api/sessions", {
+					method: "POST",
+					body: JSON.stringify({
+						title: data.title ?? "New Session",
+						modelId: data.modelId,
+						provider: data.provider,
+						thinkingLevel: data.thinkingLevel,
+					}),
+				})
+					.then((res) => {
+						// If the server assigned a different ID we still track by our key
+						if (allMessages.length > 0) {
+							return this.apiFetch(`/api/sessions/${key}/messages/batch`, {
+								method: "POST",
+								body: JSON.stringify({
+									messages: allMessages.map((m: any) => ({
+										role: m.role,
+										content: m.content,
+										stopReason: m.stopReason ?? m.stop_reason,
+										usage: m.usage,
+									})),
+								}),
+							});
+						}
+					})
+					.catch((err) => {
+						console.error("[ApiStorageBackend] create session sync error:", err);
+					});
+			}
+			return;
+		}
+
+		if (storeName === "sessions-metadata") {
+			const metadata = value as any;
+			store.set(key, metadata);
+
+			// Sync title change to server
+			if (metadata.title !== undefined) {
+				this.syncToServer(`/api/sessions/${key}`, {
+					method: "PATCH",
+					body: JSON.stringify({ title: metadata.title }),
+				});
+			}
+			return;
+		}
+
+		if (storeName === "settings") {
+			store.set(key, value);
+			this.syncToServer("/api/settings", {
+				method: "PATCH",
+				body: JSON.stringify({ settings: { [key]: value } }),
+			});
+			return;
+		}
+
+		if (storeName === "custom-providers") {
+			store.set(key, value);
+			// Sync custom providers into settings as a nested object
+			const allProviders: Record<string, any> = {};
+			for (const [k, v] of store.entries()) {
+				allProviders[k] = v;
+			}
+			this.syncToServer("/api/settings", {
+				method: "PATCH",
+				body: JSON.stringify({ settings: { customProviders: allProviders } }),
+			});
+			return;
+		}
+
+		// Fallback: just cache
+		store.set(key, value);
+	}
+
+	// -----------------------------------------------------------------------
+	// StorageBackend — delete
+	// -----------------------------------------------------------------------
+
+	async delete(storeName: string, key: string): Promise<void> {
+		await this.init();
+
+		if (storeName === "provider-keys") return;
+
+		const store = this.getStore(storeName);
+		store.delete(key);
+
+		if (storeName === "sessions") {
+			// Also remove metadata
+			this.getStore("sessions-metadata").delete(key);
+			this.knownServerSessions.delete(key);
+			this.serverMessageCounts.delete(key);
+
+			this.syncToServer(`/api/sessions/${key}`, { method: "DELETE" });
+			return;
+		}
+
+		if (storeName === "sessions-metadata") {
+			// Already handled by "sessions" delete; no separate server call
+			return;
+		}
+
+		if (storeName === "settings") {
+			this.syncToServer("/api/settings", {
+				method: "PATCH",
+				body: JSON.stringify({ settings: { [key]: null } }),
+			});
+			return;
+		}
+
+		if (storeName === "custom-providers") {
+			const allProviders: Record<string, any> = {};
+			for (const [k, v] of store.entries()) {
+				allProviders[k] = v;
+			}
+			this.syncToServer("/api/settings", {
+				method: "PATCH",
+				body: JSON.stringify({ settings: { customProviders: allProviders } }),
+			});
+			return;
+		}
+	}
+
+	// -----------------------------------------------------------------------
+	// StorageBackend — keys
+	// -----------------------------------------------------------------------
+
+	async keys(storeName: string, prefix?: string): Promise<string[]> {
+		await this.init();
+
+		if (storeName === "provider-keys") return [];
+
+		const store = this.getStore(storeName);
+		let result = Array.from(store.keys());
+
+		if (prefix) {
+			result = result.filter((k) => k.startsWith(prefix));
+		}
+
+		return result;
+	}
+
+	// -----------------------------------------------------------------------
+	// StorageBackend — getAllFromIndex
+	// -----------------------------------------------------------------------
+
+	async getAllFromIndex<T = unknown>(
+		storeName: string,
+		indexName: string,
+		direction: "asc" | "desc" = "asc",
+	): Promise<T[]> {
+		await this.init();
+
+		if (storeName === "provider-keys") return [];
+
+		const store = this.getStore(storeName);
+		const values = Array.from(store.values());
+
+		if (storeName === "sessions-metadata" && indexName === "lastModified") {
+			values.sort((a, b) => {
+				const aTime = new Date(a.lastModified ?? 0).getTime();
+				const bTime = new Date(b.lastModified ?? 0).getTime();
+				return direction === "desc" ? bTime - aTime : aTime - bTime;
+			});
+		}
+
+		return values as T[];
+	}
+
+	// -----------------------------------------------------------------------
+	// StorageBackend — clear
+	// -----------------------------------------------------------------------
+
+	async clear(storeName: string): Promise<void> {
+		await this.init();
+
+		const store = this.getStore(storeName);
+		store.clear();
+	}
+
+	// -----------------------------------------------------------------------
+	// StorageBackend — has
+	// -----------------------------------------------------------------------
+
+	async has(storeName: string, key: string): Promise<boolean> {
+		await this.init();
+
+		if (storeName === "provider-keys") return false;
+
+		const store = this.getStore(storeName);
+		return store.has(key);
+	}
+
+	// -----------------------------------------------------------------------
+	// StorageBackend — transaction
+	// -----------------------------------------------------------------------
+
+	async transaction<T>(
+		storeNames: string[],
+		_mode: "readonly" | "readwrite",
+		operation: (tx: StorageTransaction) => Promise<T>,
+	): Promise<T> {
+		await this.init();
+
+		// Accumulate writes in a buffer, then apply to cache and sync
+		const pendingOps: Array<{
+			type: "set" | "delete";
+			storeName: string;
+			key: string;
+			value?: any;
+		}> = [];
+
+		const tx: StorageTransaction = {
+			get: async <V = unknown>(storeName: string, key: string): Promise<V | null> => {
+				// Check pending writes first (most recent wins)
+				for (let i = pendingOps.length - 1; i >= 0; i--) {
+					const op = pendingOps[i];
+					if (op.storeName === storeName && op.key === key) {
+						if (op.type === "delete") return null;
+						return op.value as V;
+					}
+				}
+				const store = this.getStore(storeName);
+				return (store.get(key) as V) ?? null;
+			},
+			set: async <V = unknown>(storeName: string, key: string, value: V): Promise<void> => {
+				pendingOps.push({ type: "set", storeName, key, value });
+			},
+			delete: async (storeName: string, key: string): Promise<void> => {
+				pendingOps.push({ type: "delete", storeName, key });
+			},
+		};
+
+		const result = await operation(tx);
+
+		// Apply all pending operations
+		for (const op of pendingOps) {
+			if (op.type === "set") {
+				await this.set(op.storeName, op.key, op.value);
+			} else {
+				await this.delete(op.storeName, op.key);
+			}
+		}
+
+		return result;
+	}
+
+	// -----------------------------------------------------------------------
+	// StorageBackend — quota / persistence
+	// -----------------------------------------------------------------------
+
+	async getQuotaInfo(): Promise<{ usage: number; quota: number; percent: number }> {
+		return { usage: 0, quota: Infinity, percent: 0 };
+	}
+
+	async requestPersistence(): Promise<boolean> {
+		return true;
+	}
+}
