@@ -1,0 +1,31 @@
+{
+	"name": "chatbot-platform",
+	"version": "0.1.0",
+	"private": true,
+	"type": "module",
+	"scripts": {
+		"dev": "tsx server/index.ts",
+		"build": "vite build",
+		"preview": "vite preview",
+		"check": "tsgo --noEmit",
+		"clean": "rm -rf dist"
+	},
+	"dependencies": {
+		"@mariozechner/mini-lit": "^0.2.0",
+		"@mariozechner/pi-agent-core": "^0.52.12",
+		"@mariozechner/pi-ai": "^0.52.12",
+		"@mariozechner/pi-web-ui": "^0.52.12",
+		"@tailwindcss/vite": "^4.1.17",
+		"express": "^5.1.0",
+		"lit": "^3.3.1",
+		"lucide": "^0.544.0",
+		"ws": "^8.18.0"
+	},
+	"devDependencies": {
+		"@types/express": "^5.0.0",
+		"@types/ws": "^8.18.0",
+		"tsx": "^4.19.0",
+		"typescript": "^5.7.3",
+		"vite": "^7.1.6"
+	}
+}
