@@ -131,9 +131,6 @@ async function processZipBundle(
 
 	if (!skillMdPath) {
 		const topLevel = [...new Set(entries.map((e) => e.split("/")[0]))].slice(0, 10);
-		console.error("[skills] Zip SKILL.md not found. Entries (filtered):", entries.slice(0, 20));
-		console.error("[skills] Top-level items:", topLevel);
-		console.error("[skills] All raw entries:", allEntries.slice(0, 30));
 		return { error: `Zip must contain SKILL.md at root or inside a single top-level directory. Found top-level items: [${topLevel.join(", ")}]` };
 	}
 
