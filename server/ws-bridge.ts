@@ -9,6 +9,7 @@ import { type ChildProcess, spawn } from "node:child_process";
 import { existsSync } from "node:fs";
 import * as path from "node:path";
 import * as readline from "node:readline";
+import { fileURLToPath } from "node:url";
 import type { WebSocket } from "ws";
 
 /** Provider name → environment variable name mapping */
@@ -223,7 +224,7 @@ export class WsBridge {
 		}
 
 		const candidates = [
-			path.resolve(import.meta.dirname, "../../coding-agent/dist/cli.js"),
+			path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../coding-agent/dist/cli.js"),
 			path.resolve(process.cwd(), "../coding-agent/dist/cli.js"),
 			path.resolve(process.cwd(), "node_modules/@mariozechner/pi-coding-agent/dist/cli.js"),
 		];

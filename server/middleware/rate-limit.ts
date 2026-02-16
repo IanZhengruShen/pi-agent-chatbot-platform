@@ -1,10 +1,10 @@
-import rateLimit from "express-rate-limit";
+import rateLimit, { ipKeyGenerator } from "express-rate-limit";
 
 /** 300 req/min per user for general API routes */
 export const apiRateLimit = rateLimit({
 	windowMs: 60 * 1000,
 	max: 300,
-	keyGenerator: (req) => req.user?.userId || req.ip || "anonymous",
+	keyGenerator: (req) => req.user?.userId || ipKeyGenerator(req),
 	standardHeaders: true,
 	legacyHeaders: false,
 	message: { success: false, error: "Too many requests, please try again later" },
@@ -14,7 +14,7 @@ export const apiRateLimit = rateLimit({
 export const chatRateLimit = rateLimit({
 	windowMs: 60 * 1000,
 	max: 60,
-	keyGenerator: (req) => req.user?.userId || req.ip || "anonymous",
+	keyGenerator: (req) => req.user?.userId || ipKeyGenerator(req),
 	standardHeaders: true,
 	legacyHeaders: false,
 	message: { success: false, error: "Too many messages, please slow down" },
@@ -24,7 +24,7 @@ export const chatRateLimit = rateLimit({
 export const authRateLimit = rateLimit({
 	windowMs: 60 * 1000,
 	max: 10,
-	keyGenerator: (req) => req.ip || "anonymous",
+	keyGenerator: (req) => ipKeyGenerator(req),
 	standardHeaders: true,
 	legacyHeaders: false,
 	message: { success: false, error: "Too many auth attempts, please try again later" },

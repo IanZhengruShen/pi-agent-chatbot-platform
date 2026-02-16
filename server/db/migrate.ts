@@ -1,8 +1,10 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { fileURLToPath } from "node:url";
 import type { Database } from "./types.js";
 
-const MIGRATIONS_DIR = path.resolve(import.meta.dirname, "migrations");
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const MIGRATIONS_DIR = path.resolve(__dirname, "migrations");
 
 /**
  * Run all pending SQL migrations.
@@ -65,7 +67,7 @@ export async function runMigrations(db: Database): Promise<void> {
 // Allow running directly: npx tsx server/db/migrate.ts
 if (process.argv[1] && import.meta.url.endsWith(process.argv[1].replace(/\\/g, "/"))) {
 	const dotenv = await import("dotenv");
-	dotenv.config({ path: path.resolve(import.meta.dirname, "../../.env.development") });
+	dotenv.config({ path: path.resolve(__dirname, "../../.env.development") });
 
 	if (!process.env.DATABASE_URL) {
 		console.error("[migrate] DATABASE_URL is not set. Copy .env.development.example to .env.development");

@@ -12,6 +12,7 @@ import { type ChildProcess, spawn } from "node:child_process";
 import { existsSync } from "node:fs";
 import * as path from "node:path";
 import * as readline from "node:readline";
+import { fileURLToPath } from "node:url";
 import type { WebSocket } from "ws";
 import type { CryptoService } from "./services/crypto.js";
 import type { ProcessPool } from "./services/process-pool.js";
@@ -44,6 +45,8 @@ export class TenantBridge extends WsBridge {
 	private db: Database;
 	private storage: StorageService;
 	private resolvedSkills: ResolvedSkills | null = null;
+	private pendingMessages: string[] = [];
+	private ready = false;
 
 	constructor(ws: WebSocket, options: TenantBridgeOptions) {
 		super(ws, options);
@@ -56,10 +59,14 @@ export class TenantBridge extends WsBridge {
 	}
 
 	/**
-	 * Override start(): fetch and decrypt team API keys, then spawn or
-	 * reattach to an existing process via the process pool.
+	 * Override start(): register WebSocket handlers immediately (to capture
+	 * early messages), then async-initialize keys + skills + process.
 	 */
 	override start(): void {
+		// Register WS handlers eagerly so messages arriving during async
+		// startup are buffered instead of lost.
+		this.wireUpWebSocket();
+
 		this.startAsync().catch((err) => {
 			console.error("[tenant-bridge] Failed to start:", err);
 			this.ws.close(1011, "Failed to initialize agent");
@@ -91,7 +98,7 @@ export class TenantBridge extends WsBridge {
 				this.process = existing.process;
 				this.processPool.touch(existingSessionId);
 				this.wireUpProcess();
-				this.wireUpWebSocket();
+				this.flushPendingMessages();
 				return;
 			}
 		}
@@ -109,7 +116,21 @@ export class TenantBridge extends WsBridge {
 
 		this.process = info.process;
 		this.wireUpProcess();
-		this.wireUpWebSocket();
+		this.flushPendingMessages();
+	}
+
+	/**
+	 * Mark bridge as ready and flush any messages buffered during async startup.
+	 */
+	private flushPendingMessages(): void {
+		this.ready = true;
+		if (this.pendingMessages.length > 0 && this.process?.stdin) {
+			console.log(`[tenant-bridge] Flushing ${this.pendingMessages.length} buffered message(s)`);
+			for (const msg of this.pendingMessages) {
+				this.process.stdin.write(msg + "\n");
+			}
+			this.pendingMessages = [];
+		}
 	}
 
 	/**
@@ -160,7 +181,7 @@ export class TenantBridge extends WsBridge {
 			commandArgs = [process.env.PI_CLI_PATH];
 		} else {
 			const candidates = [
-				path.resolve(import.meta.dirname, "../coding-agent/dist/cli.js"),
+				path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../coding-agent/dist/cli.js"),
 				path.resolve(process.cwd(), "../coding-agent/dist/cli.js"),
 				path.resolve(process.cwd(), "node_modules/@mariozechner/pi-coding-agent/dist/cli.js"),
 			];
@@ -255,8 +276,13 @@ export class TenantBridge extends WsBridge {
 					return;
 				}
 
+				// Buffer messages until process is ready
+				if (!this.ready || !this.process?.stdin) {
+					this.pendingMessages.push(message);
+					return;
+				}
+
 				// Forward to pi process stdin
-				if (!this.process?.stdin) return;
 				console.log(`[ws→rpc] ${parsed.type || "unknown"}${parsed.id ? ` (${parsed.id})` : ""}`);
 				this.process.stdin.write(message + "\n");
 

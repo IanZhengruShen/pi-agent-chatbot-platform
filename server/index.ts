@@ -5,10 +5,13 @@
  * In production: serves static files from dist/ + WebSocket bridge + API routes
  */
 
-import "dotenv/config";
+import dotenv from "dotenv";
+dotenv.config({ path: ".env.development" });
+dotenv.config(); // also load .env if it exists (overrides nothing by default)
 import express from "express";
 import { createServer } from "node:http";
 import * as path from "node:path";
+import { fileURLToPath } from "node:url";
 import { WebSocketServer } from "ws";
 import { authenticateWsUpgrade } from "./auth/ws-auth.js";
 import { createDatabase } from "./db/index.js";
@@ -124,11 +127,11 @@ async function main() {
 	};
 
 	if (isDev) {
-		// In dev mode, use Vite's dev server as middleware
+		// In dev mode, use Vite's dev server as middleware.
 		const { createServer: createViteServer } = await import("vite");
 		const vite = await createViteServer({
-			configFile: path.resolve(import.meta.dirname, "../vite.config.ts"),
-			root: path.resolve(import.meta.dirname, ".."),
+			configFile: path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../vite.config.ts"),
+			root: path.resolve(path.dirname(fileURLToPath(import.meta.url)), ".."),
 			server: {
 				middlewareMode: true,
 				hmr: {
@@ -140,10 +143,25 @@ async function main() {
 		// Vite middleware AFTER API routes so /api/* is handled first
 		app.use(vite.middlewares);
 
-		server.on("upgrade", handleUpgrade);
+		// Vite registers its own upgrade handler for HMR. We need a single
+		// dispatcher that routes /ws to us and everything else to Vite.
+		const viteUpgradeListeners = server.listeners("upgrade").slice();
+		server.removeAllListeners("upgrade");
+
+		server.on("upgrade", (req: any, socket: any, head: any) => {
+			const pathname = new URL(req.url || "/", `http://localhost:${PORT}`).pathname;
+			if (pathname === "/ws") {
+				handleUpgrade(req, socket, head);
+			} else {
+				// Forward to Vite's HMR upgrade handler(s)
+				for (const listener of viteUpgradeListeners) {
+					(listener as Function).call(server, req, socket, head);
+				}
+			}
+		});
 	} else {
 		// In production, serve the built files
-		const distPath = path.resolve(import.meta.dirname, "../dist");
+		const distPath = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../dist");
 		app.use(express.static(distPath));
 
 		// SPA fallback — but not for /api/* routes
