@@ -1,8 +1,9 @@
 /**
- * Browser entry point for the Pi Coding Agent Web UI.
+ * Browser entry point for the Chatbot Platform.
  *
- * Connects to the bridge server via WebSocket and uses RemoteAgent
- * to drive the ChatPanel with the full coding agent backend.
+ * Auth-gated: shows login page until authenticated, then connects
+ * to the bridge server via WebSocket and uses RemoteAgent to drive
+ * the ChatPanel with the full coding agent backend.
  */
 
 import "@mariozechner/mini-lit/dist/ThemeToggle.js";
@@ -10,11 +11,9 @@ import { icon } from "@mariozechner/mini-lit";
 import { Button } from "@mariozechner/mini-lit/dist/Button.js";
 import type { Agent, AgentEvent, AgentMessage } from "@mariozechner/pi-agent-core";
 import {
-	ApiKeyPromptDialog,
 	AppStorage,
 	ChatPanel,
 	CustomProvidersStore,
-	IndexedDBStorageBackend,
 	ProviderKeysStore,
 	ProvidersModelsTab,
 	ProxyTab,
@@ -25,43 +24,22 @@ import {
 	setAppStorage,
 } from "@mariozechner/pi-web-ui";
 import { html, render } from "lit";
-import { History, RotateCcw, Settings, Wifi, WifiOff } from "lucide";
+import { History, LogOut, RotateCcw, Settings, Wifi, WifiOff } from "lucide";
+import { AuthClient } from "./auth/auth-client.js";
+import "./auth/login-page.js";
 import { RemoteAgent } from "./remote-agent.js";
+import { ApiStorageBackend } from "./storage/api-storage-backend.js";
 import "./app.css";
 
 // ============================================================================
-// Storage setup (reused from web-ui example for settings/API keys)
+// Auth
 // ============================================================================
-const settings = new SettingsStore();
-const providerKeys = new ProviderKeysStore();
-const sessions = new SessionsStore();
-const customProviders = new CustomProvidersStore();
-
-const configs = [
-	settings.getConfig(),
-	SessionsStore.getMetadataConfig(),
-	providerKeys.getConfig(),
-	customProviders.getConfig(),
-	sessions.getConfig(),
-];
-
-const backend = new IndexedDBStorageBackend({
-	dbName: "pi-web-ui-agent",
-	version: 1,
-	stores: configs,
-});
-
-settings.setBackend(backend);
-providerKeys.setBackend(backend);
-customProviders.setBackend(backend);
-sessions.setBackend(backend);
-
-const storage = new AppStorage(settings, providerKeys, sessions, customProviders, backend);
-setAppStorage(storage);
+const authClient = new AuthClient();
 
 // ============================================================================
 // State
 // ============================================================================
+let storage: AppStorage | null = null;
 let remoteAgent: RemoteAgent | null = null;
 let chatPanel: ChatPanel;
 let agentUnsubscribe: (() => void) | undefined;
@@ -70,6 +48,31 @@ let currentSessionId: string | undefined;
 let currentTitle = "";
 let ws: WebSocket | null = null;
 let reconnectTimer: ReturnType<typeof setTimeout> | undefined;
+
+// ============================================================================
+// Storage setup (ApiStorageBackend replaces IndexedDB)
+// ============================================================================
+
+function initStorage(): AppStorage {
+	const backend = new ApiStorageBackend({
+		baseUrl: "",
+		getToken: () => authClient.token,
+	});
+
+	const settings = new SettingsStore();
+	const providerKeys = new ProviderKeysStore();
+	const sessions = new SessionsStore();
+	const customProviders = new CustomProvidersStore();
+
+	settings.setBackend(backend);
+	providerKeys.setBackend(backend);
+	customProviders.setBackend(backend);
+	sessions.setBackend(backend);
+
+	const appStorage = new AppStorage(settings, providerKeys, sessions, customProviders, backend);
+	setAppStorage(appStorage);
+	return appStorage;
+}
 
 // ============================================================================
 // Session helpers
@@ -106,7 +109,7 @@ const shouldSaveSession = (messages: AgentMessage[]): boolean => {
 };
 
 const saveSession = async () => {
-	if (!currentSessionId || !remoteAgent || !currentTitle) return;
+	if (!currentSessionId || !remoteAgent || !currentTitle || !storage) return;
 
 	const state = remoteAgent.state;
 	if (!shouldSaveSession(state.messages)) return;
@@ -148,6 +151,8 @@ const saveSession = async () => {
 };
 
 const loadSession = async (sessionId: string): Promise<boolean> => {
+	if (!storage) return false;
+
 	const sessionData = await storage.sessions.get(sessionId);
 	if (!sessionData) {
 		console.error("Session not found:", sessionId);
@@ -176,25 +181,8 @@ const loadSession = async (sessionId: string): Promise<boolean> => {
 function getWsUrl(): string {
 	const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
 	const host = window.location.host;
-	return `${protocol}//${host}/ws`;
-}
-
-/**
- * Prompt the user for an API key using the standard ApiKeyPromptDialog,
- * then read it from storage and forward it to the bridge server.
- */
-async function promptAndForwardApiKey(provider: string): Promise<string | undefined> {
-	// Clear any dummy/stale key so the dialog doesn't auto-close
-	await storage.providerKeys.delete(provider);
-
-	// Show the standard API key dialog (ProviderKeyInput validates the key
-	// by making a test API call, then saves to IndexedDB on success)
-	const success = await ApiKeyPromptDialog.prompt(provider);
-	if (!success) return undefined;
-
-	// Read the validated key back from storage
-	const apiKey = await storage.providerKeys.get(provider);
-	return apiKey ?? undefined;
+	const token = authClient.token;
+	return `${protocol}//${host}/ws?token=${encodeURIComponent(token || "")}`;
 }
 
 function connectWebSocket(): void {
@@ -211,23 +199,12 @@ function connectWebSocket(): void {
 		// Create RemoteAgent with the WebSocket
 		remoteAgent = new RemoteAgent(ws!);
 
-		// When the server reports a missing API key, show the standard dialog
-		// and forward the key to the bridge server
-		remoteAgent.onApiKeyRequired = async (provider: string): Promise<string | undefined> => {
-			return promptAndForwardApiKey(provider);
-		};
-
-		// Set up ChatPanel with the remote agent immediately so the UI
-		// shows the chat input right away instead of "No agent set".
+		// Set up ChatPanel with the remote agent
 		await chatPanel.setAgent(remoteAgent as unknown as Agent, {
-			onApiKeyRequired: async (provider: string) => {
-				// When AgentInterface detects no key for a provider (e.g. after
-				// switching models), prompt the user and forward to bridge
-				const apiKey = await promptAndForwardApiKey(provider);
-				if (apiKey && remoteAgent) {
-					await remoteAgent.setApiKey(provider, apiKey);
-				}
-				return !!apiKey;
+			onApiKeyRequired: async (_provider: string) => {
+				// API keys are managed server-side in this platform
+				console.warn("API key required — configure in team settings");
+				return false;
 			},
 			toolsFactory: () => {
 				// No browser-side tools — all tools run on the server
@@ -248,21 +225,6 @@ function connectWebSocket(): void {
 		} catch (err) {
 			console.error("Failed to sync initial state:", err);
 		}
-
-		// Restore API keys in background (slow — restarts the pi process)
-		(async () => {
-			try {
-				const providers = await storage.providerKeys.list();
-				for (const provider of providers) {
-					const key = await storage.providerKeys.get(provider);
-					if (key && remoteAgent) {
-						await remoteAgent.setApiKey(provider, key);
-					}
-				}
-			} catch (err) {
-				console.warn("Failed to restore API keys from storage:", err);
-			}
-		})();
 
 		// Subscribe to events for UI updates + auto-save
 		agentUnsubscribe = remoteAgent.subscribe((_event: AgentEvent) => {
@@ -299,17 +261,33 @@ function connectWebSocket(): void {
 		}
 		renderApp();
 
-		// Auto-reconnect after 3 seconds
-		clearTimeout(reconnectTimer);
-		reconnectTimer = setTimeout(() => {
-			console.log("[ws] Attempting reconnect...");
-			connectWebSocket();
-		}, 3000);
+		// Auto-reconnect after 3 seconds (only if still authenticated)
+		if (authClient.isAuthenticated) {
+			clearTimeout(reconnectTimer);
+			reconnectTimer = setTimeout(() => {
+				console.log("[ws] Attempting reconnect...");
+				connectWebSocket();
+			}, 3000);
+		}
 	});
 
 	ws.addEventListener("error", (event) => {
 		console.error("[ws] Error:", event);
 	});
+}
+
+function disconnectWebSocket(): void {
+	clearTimeout(reconnectTimer);
+	if (ws) {
+		ws.close();
+		ws = null;
+	}
+	wsConnected = false;
+	remoteAgent = null;
+	if (agentUnsubscribe) {
+		agentUnsubscribe();
+		agentUnsubscribe = undefined;
+	}
 }
 
 // ============================================================================
@@ -320,12 +298,23 @@ const renderApp = () => {
 	const app = document.getElementById("app");
 	if (!app) return;
 
+	// Not authenticated — show login page
+	if (!authClient.isAuthenticated) {
+		const loginHtml = html`
+			<login-page .authClient=${authClient} @auth-success=${onAuthSuccess}></login-page>
+		`;
+		render(loginHtml, app);
+		return;
+	}
+
+	// Authenticated — show main app
+	const user = authClient.user;
 	const appHtml = html`
 		<div class="w-full h-screen flex flex-col bg-background text-foreground overflow-hidden">
 			<!-- Header -->
 			<div class="flex items-center justify-between border-b border-border shrink-0">
 				<div class="flex items-center gap-2 px-4 py-2">
-					<span class="text-base font-semibold text-foreground">Pi Coding Agent</span>
+					<span class="text-base font-semibold text-foreground">Chatbot Platform</span>
 				</div>
 				<div class="flex items-center gap-1 px-2">
 					<!-- Connection status -->
@@ -336,6 +325,9 @@ const renderApp = () => {
 								: html`${icon(WifiOff, "sm")} <span>Disconnected</span>`
 						}
 					</div>
+
+					<!-- User info -->
+					<span class="text-xs text-muted-foreground px-2">${user?.email || ""}</span>
 
 					<!-- Session history -->
 					${Button({
@@ -380,13 +372,22 @@ const renderApp = () => {
 
 					<theme-toggle></theme-toggle>
 
-					<!-- Settings (providers, API keys, proxy) -->
+					<!-- Settings (providers, proxy) -->
 					${Button({
 						variant: "ghost",
 						size: "sm",
 						children: icon(Settings, "sm"),
 						onClick: () => SettingsDialog.open([new ProvidersModelsTab(), new ProxyTab()]),
 						title: "Settings",
+					})}
+
+					<!-- Logout -->
+					${Button({
+						variant: "ghost",
+						size: "sm",
+						children: icon(LogOut, "sm"),
+						onClick: handleLogout,
+						title: "Logout",
 					})}
 				</div>
 			</div>
@@ -406,6 +407,27 @@ const renderApp = () => {
 };
 
 // ============================================================================
+// Auth handlers
+// ============================================================================
+
+function onAuthSuccess() {
+	// Initialize storage and connect after successful login
+	storage = initStorage();
+	chatPanel = new ChatPanel();
+	connectWebSocket();
+	renderApp();
+}
+
+function handleLogout() {
+	disconnectWebSocket();
+	storage = null;
+	currentSessionId = undefined;
+	currentTitle = "";
+	authClient.logout();
+	renderApp();
+}
+
+// ============================================================================
 // Init
 // ============================================================================
 
@@ -413,14 +435,18 @@ async function initApp() {
 	const app = document.getElementById("app");
 	if (!app) throw new Error("App container not found");
 
-	// Create ChatPanel first, then render the full app layout immediately.
-	// The ChatPanel will show its own placeholder until setAgent() is called
-	// once the WebSocket connects, but the overall app chrome (header, etc.)
-	// is visible right away.
-	chatPanel = new ChatPanel();
-
-	// Connect to bridge server
-	connectWebSocket();
+	if (authClient.isAuthenticated) {
+		// Validate stored token
+		const valid = await authClient.validate();
+		if (valid) {
+			storage = initStorage();
+			chatPanel = new ChatPanel();
+			connectWebSocket();
+		} else {
+			// Token expired/invalid — show login
+			authClient.logout();
+		}
+	}
 
 	renderApp();
 }
