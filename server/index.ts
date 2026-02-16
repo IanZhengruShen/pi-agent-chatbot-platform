@@ -17,6 +17,7 @@ import { apiRateLimit, authRateLimit } from "./middleware/rate-limit.js";
 import authRouter from "./routes/auth.js";
 import sessionsRouter from "./routes/sessions.js";
 import settingsRouter from "./routes/settings.js";
+import importRouter from "./routes/import.js";
 import { WsBridge, type BridgeOptions } from "./ws-bridge.js";
 import { requireAuth } from "./auth/middleware.js";
 
@@ -42,6 +43,7 @@ async function main() {
 	app.use("/api/auth", authRateLimit, authRouter);
 	app.use("/api/sessions", requireAuth, apiRateLimit, sessionsRouter);
 	app.use("/api/settings", requireAuth, apiRateLimit, settingsRouter);
+	app.use("/api/import", requireAuth, apiRateLimit, importRouter);
 
 	// --- WebSocket ---
 	const server = createServer(app);
