@@ -92,3 +92,40 @@ export interface UserFileRow {
 	storage_key: string;
 	created_at: Date;
 }
+
+export interface ScheduledJobRow {
+	id: string;
+	owner_type: "user" | "team";
+	owner_id: string;
+	name: string;
+	description: string | null;
+	cron_expr: string;
+	next_run_at: Date;
+	prompt: string;
+	skill_ids: string[] | null;
+	file_ids: string[] | null;
+	model_id: string | null;
+	provider: string | null;
+	delivery: { type: "email"; to: string } | { type: "teams"; webhook: string };
+	enabled: boolean;
+	last_run_at: Date | null;
+	last_status: string | null;
+	last_error: string | null;
+	failure_count: number;
+	created_at: Date;
+	updated_at: Date;
+	created_by: string;
+}
+
+export interface JobRunRow {
+	id: string;
+	job_id: string;
+	started_at: Date;
+	finished_at: Date | null;
+	status: "running" | "success" | "failed" | "timeout";
+	result: any;
+	error: string | null;
+	usage: any;
+	delivery_status: "pending" | "sent" | "failed" | null;
+	delivery_error: string | null;
+}

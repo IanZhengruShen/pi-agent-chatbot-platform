@@ -27,8 +27,9 @@ import "./components/ProviderKeysPanel.js";
 import "./components/SkillsPanel.js";
 import "./components/FilesPanel.js";
 import "./components/OAuthConnectionsPanel.js";
+import "./components/SchedulerPanel.js";
 import { html, render } from "lit";
-import { FileUp, History, KeyRound, Link, LogOut, Puzzle, RotateCcw, Settings, Wifi, WifiOff } from "lucide";
+import { Calendar, FileUp, History, KeyRound, Link, LogOut, Puzzle, RotateCcw, Settings, Wifi, WifiOff } from "lucide";
 import { AuthClient } from "./auth/auth-client.js";
 import "./auth/login-page.js";
 import { RemoteAgent } from "./remote-agent.js";
@@ -539,6 +540,36 @@ const renderApp = () => {
 							});
 						},
 						title: "Files",
+					})}
+
+					<!-- Scheduled Jobs -->
+					${Button({
+						variant: "ghost",
+						size: "sm",
+						children: icon(Calendar, "sm"),
+						onClick: () => {
+							const dialog = document.createElement("dialog");
+							dialog.style.cssText = "max-width: 900px; width: 90vw; padding: 1.5rem; border: 1px solid var(--border); border-radius: 0.5rem; background: var(--background);";
+							dialog.innerHTML = `
+								<div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 1rem;">
+									<h2 style="margin: 0; font-size: 1.25rem; font-weight: 600;">Scheduled Jobs</h2>
+									<button style="border: none; background: transparent; font-size: 1.5rem; cursor: pointer; padding: 0.25rem;" onclick="this.closest('dialog').close()">&times;</button>
+								</div>
+								<scheduler-panel></scheduler-panel>
+							`;
+							const panel = dialog.querySelector("scheduler-panel") as any;
+							if (panel) {
+								panel.getToken = () => authClient.token;
+								panel.userRole = user?.role || "member";
+							}
+							document.body.appendChild(dialog);
+							dialog.showModal();
+							dialog.addEventListener("close", () => dialog.remove());
+							dialog.addEventListener("click", (e) => {
+								if (e.target === dialog) dialog.close();
+							});
+						},
+						title: "Scheduled Jobs",
 					})}
 
 					<theme-toggle></theme-toggle>
