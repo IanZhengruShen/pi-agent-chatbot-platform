@@ -128,7 +128,7 @@ export class SessionListDialog extends DialogBase {
 													</div>
 												</div>
 												<button
-													class="opacity-0 group-hover:opacity-100 p-1 rounded hover:bg-destructive/10 text-destructive transition-opacity"
+													class="opacity-0 group-hover:opacity-100 pointer-events-none group-hover:pointer-events-auto p-1 rounded hover:bg-destructive/10 text-destructive transition-opacity"
 													@click=${(e: Event) => this.handleDelete(session.id, e)}
 													title=${i18n("Delete")}
 												>

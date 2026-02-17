@@ -54,6 +54,7 @@ let skillsList: Array<{ name: string; description: string }> = [];
 let reconnectTimer: ReturnType<typeof setTimeout> | undefined;
 let reconnectDelay = 1000; // Exponential backoff: 1s → 2s → 4s → ... → 30s max
 const MAX_RECONNECT_DELAY = 30_000;
+let saveSessionTimer: ReturnType<typeof setTimeout> | undefined;
 
 // ============================================================================
 // Storage setup (ApiStorageBackend replaces IndexedDB)
@@ -169,11 +170,16 @@ const loadSession = async (sessionId: string): Promise<boolean> => {
 	currentSessionId = sessionId;
 	currentTitle = metadata?.title || "";
 
-	// Reset server state (can't restore old context)
+	// Load saved messages without resetting the server
+	// (Server can't restore old context, but we can show read-only history)
 	if (remoteAgent) {
-		await remoteAgent.newSession();
-		// Display saved messages in the chat (read-only history)
-		remoteAgent.state.messages = sessionData.messages;
+		// Use the public method to load messages and notify UI
+		remoteAgent.loadMessagesFromStorage(sessionData.messages);
+
+		// Force UI components to re-render with loaded messages
+		if (chatPanel?.agentInterface) {
+			chatPanel.agentInterface.requestUpdate();
+		}
 	}
 
 	renderApp();
@@ -250,9 +256,13 @@ function connectWebSocket(): void {
 				currentSessionId = crypto.randomUUID();
 			}
 
-			// Auto-save
+			// Debounced auto-save: wait 500ms after last event to ensure
+			// fetchMessages() completes and messages are fully synced
 			if (currentSessionId) {
-				saveSession();
+				clearTimeout(saveSessionTimer);
+				saveSessionTimer = setTimeout(() => {
+					saveSession();
+				}, 500);
 			}
 
 			renderApp();
@@ -263,6 +273,13 @@ function connectWebSocket(): void {
 
 	ws.addEventListener("close", (event) => {
 		console.log(`[ws] Disconnected (code=${event.code}, reason=${event.reason})`);
+
+		// Save session immediately before disconnecting
+		clearTimeout(saveSessionTimer);
+		if (currentSessionId && remoteAgent) {
+			saveSession();
+		}
+
 		wsConnected = false;
 		remoteAgent = null;
 		if (agentUnsubscribe) {
@@ -290,6 +307,7 @@ function connectWebSocket(): void {
 
 function disconnectWebSocket(): void {
 	clearTimeout(reconnectTimer);
+	clearTimeout(saveSessionTimer);
 	if (ws) {
 		ws.close();
 		ws = null;

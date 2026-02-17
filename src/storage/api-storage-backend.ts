@@ -124,6 +124,41 @@ export class ApiStorageBackend implements StorageBackend {
 		});
 	}
 
+	/**
+	 * Add toolCallId field to toolResult messages by matching with preceding assistant's toolCalls.
+	 *
+	 * The database stores toolResult messages separately without toolCallId, but the UI needs
+	 * this field to match results with their corresponding tool calls. This method enriches
+	 * the messages by adding toolCallIds based on the order of tool calls and results.
+	 *
+	 * Modifies messages in-place.
+	 */
+	private addToolCallIds(messages: any[]): void {
+		for (let i = 0; i < messages.length; i++) {
+			const msg = messages[i];
+
+			// Look for assistant messages with tool calls
+			if (msg.role === "assistant") {
+				const toolCalls = (msg.content || []).filter((block: any) => block.type === "toolCall");
+
+				if (toolCalls.length > 0) {
+					// Match following toolResult messages with these toolCalls
+					let toolCallIndex = 0;
+					for (let j = i + 1; j < messages.length && toolCallIndex < toolCalls.length; j++) {
+						if (messages[j].role === "toolResult") {
+							// Add toolCallId field to match this with the tool call
+							messages[j].toolCallId = toolCalls[toolCallIndex].id;
+							toolCallIndex++;
+						} else if (messages[j].role !== "toolResult") {
+							// Stop when we hit a non-toolResult message
+							break;
+						}
+					}
+				}
+			}
+		}
+	}
+
 	// -----------------------------------------------------------------------
 	// StorageBackend — get
 	// -----------------------------------------------------------------------
@@ -150,6 +185,9 @@ export class ApiStorageBackend implements StorageBackend {
 				const messages = messagesRes?.data?.messages ?? [];
 				// Messages come back DESC from server; reverse to ASC
 				messages.reverse();
+
+				// Add toolCallId to toolResult messages by matching with preceding assistant toolCalls
+				this.addToolCallIds(messages);
 
 				const sessionData = {
 					id: session.id,
@@ -206,7 +244,46 @@ export class ApiStorageBackend implements StorageBackend {
 
 			if (this.knownServerSessions.has(key)) {
 				// Session exists on server — patch metadata + batch new messages
-				this.syncToServer(`/api/sessions/${key}`, {
+				const handleSessionNotFound = () => {
+					console.log(`[ApiStorageBackend] Session ${key} not found on server, recreating...`);
+					this.knownServerSessions.delete(key);
+					this.serverMessageCounts.delete(key);
+					// Create the session on the server
+					const allMessages = data.messages ?? [];
+					this.apiFetch("/api/sessions", {
+						method: "POST",
+						body: JSON.stringify({
+							id: key,
+							title: data.title ?? "New Session",
+							modelId: data.modelId,
+							provider: data.provider,
+							thinkingLevel: data.thinkingLevel,
+						}),
+					})
+						.then(() => {
+							this.knownServerSessions.add(key);
+							// Now sync messages if there are any
+							if (allMessages.length > 0) {
+								this.serverMessageCounts.set(key, allMessages.length);
+								return this.apiFetch(`/api/sessions/${key}/messages/batch`, {
+									method: "POST",
+									body: JSON.stringify({
+										messages: allMessages.map((m: any) => ({
+											role: m.role,
+											content: m.content,
+											stopReason: m.stopReason ?? m.stop_reason,
+											usage: m.usage,
+										})),
+									}),
+								});
+							}
+						})
+						.catch((err) => {
+							console.error("[ApiStorageBackend] Failed to recreate session:", err);
+						});
+				};
+
+				this.apiFetch(`/api/sessions/${key}`, {
 					method: "PATCH",
 					body: JSON.stringify({
 						title: data.title,
@@ -214,6 +291,13 @@ export class ApiStorageBackend implements StorageBackend {
 						modelId: data.modelId,
 						provider: data.provider,
 					}),
+				}).catch((err) => {
+					// If session doesn't exist on server (404), recreate it
+					if (err.message?.includes("404")) {
+						handleSessionNotFound();
+					} else {
+						console.error("[ApiStorageBackend] PATCH session error:", err);
+					}
 				});
 
 				const knownCount = this.serverMessageCounts.get(key) ?? 0;
@@ -241,9 +325,14 @@ export class ApiStorageBackend implements StorageBackend {
 							}
 						})
 						.catch((err) => {
-							// Rollback count on failure so retry sends the same messages
-							console.error("[ApiStorageBackend] batch sync failed:", err);
-							this.serverMessageCounts.set(key, knownCount);
+							// If session doesn't exist (404), recreate it
+							if (err.message?.includes("404")) {
+								handleSessionNotFound();
+							} else {
+								// Rollback count on other failures so retry sends the same messages
+								console.error("[ApiStorageBackend] batch sync failed:", err);
+								this.serverMessageCounts.set(key, knownCount);
+							}
 						});
 				}
 			} else {
@@ -255,14 +344,15 @@ export class ApiStorageBackend implements StorageBackend {
 				this.apiFetch("/api/sessions", {
 					method: "POST",
 					body: JSON.stringify({
+						id: key, // Send client-generated ID so server uses it
 						title: data.title ?? "New Session",
 						modelId: data.modelId,
 						provider: data.provider,
 						thinkingLevel: data.thinkingLevel,
 					}),
 				})
-					.then((res) => {
-						// If the server assigned a different ID we still track by our key
+					.then(() => {
+						// Session created successfully, now sync messages if any
 						if (allMessages.length > 0) {
 							return this.apiFetch(`/api/sessions/${key}/messages/batch`, {
 								method: "POST",
@@ -448,7 +538,7 @@ export class ApiStorageBackend implements StorageBackend {
 	// -----------------------------------------------------------------------
 
 	async transaction<T>(
-		storeNames: string[],
+		_storeNames: string[],
 		_mode: "readonly" | "readwrite",
 		operation: (tx: StorageTransaction) => Promise<T>,
 	): Promise<T> {

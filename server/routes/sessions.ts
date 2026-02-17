@@ -72,8 +72,9 @@ router.get("/", async (req: Request, res: Response) => {
 router.post("/", async (req: Request, res: Response) => {
 	try {
 		const db = getDatabase();
-		const { title, modelId, provider, thinkingLevel } = req.body;
-		const id = randomUUID();
+		const { id, title, modelId, provider, thinkingLevel } = req.body;
+		// Use client-provided ID if present, otherwise generate one
+		const sessionId = id || randomUUID();
 		const now = new Date();
 
 		const result = await db.query<SessionRow>(
@@ -81,7 +82,7 @@ router.post("/", async (req: Request, res: Response) => {
 			 VALUES ($1, $2, $3, $4, $5, $6, 0, '', $7, $7)
 			 RETURNING *`,
 			[
-				id,
+				sessionId,
 				req.user!.userId,
 				title ?? "New Session",
 				modelId ?? null,
@@ -223,8 +224,19 @@ router.post("/:id/messages", async (req: Request, res: Response) => {
 		if (!session) return;
 
 		const db = getDatabase();
-		const { role, content, stopReason, usage } = req.body;
+		const { role, content: rawContent, stopReason, usage } = req.body;
 		const id = randomUUID();
+
+		// Ensure content is a proper JavaScript object/array for JSONB
+		let content = rawContent;
+		if (typeof content === "string") {
+			try {
+				content = JSON.parse(content);
+			} catch {
+				// If parsing fails, treat as plain text message
+				content = [{ type: "text", text: content }];
+			}
+		}
 
 		const client = await db.getClient();
 		try {
@@ -236,11 +248,15 @@ router.post("/:id/messages", async (req: Request, res: Response) => {
 			);
 			const ordinal = ordinalResult.rows[0].next_ordinal;
 
+			// Convert to JSON string for JSONB parameter
+			const contentJson = JSON.stringify(content);
+			const usageJson = usage ? JSON.stringify(usage) : null;
+
 			const msgResult = await client.query<MessageRow>(
 				`INSERT INTO messages (id, session_id, ordinal, role, content, stop_reason, usage, created_at)
-				 VALUES ($1, $2, $3, $4, $5, $6, $7, NOW())
+				 VALUES ($1, $2, $3, $4, $5::jsonb, $6, $7::jsonb, NOW())
 				 RETURNING *`,
-				[id, session.id, ordinal, role, content, stopReason ?? null, usage ?? null],
+				[id, session.id, ordinal, role, contentJson, stopReason ?? null, usageJson],
 			);
 
 			await client.query(
@@ -297,18 +313,34 @@ router.post("/:id/messages/batch", async (req: Request, res: Response) => {
 
 			for (const msg of messages) {
 				const id = randomUUID();
+				// Ensure content is a proper JavaScript object/array for JSONB
+				// If it's a string, parse it; otherwise use as-is
+				let content = msg.content;
+				if (typeof content === "string") {
+					try {
+						content = JSON.parse(content);
+					} catch {
+						// If parsing fails, treat as plain text message
+						content = [{ type: "text", text: content }];
+					}
+				}
+
+				// Convert to JSON string for JSONB parameters
+				const contentJson = JSON.stringify(content);
+				const usageJson = msg.usage ? JSON.stringify(msg.usage) : null;
+
 				const result = await client.query<MessageRow>(
 					`INSERT INTO messages (id, session_id, ordinal, role, content, stop_reason, usage, created_at)
-					 VALUES ($1, $2, $3, $4, $5, $6, $7, NOW())
+					 VALUES ($1, $2, $3, $4, $5::jsonb, $6, $7::jsonb, NOW())
 					 RETURNING *`,
 					[
 						id,
 						session.id,
 						ordinal,
 						msg.role,
-						msg.content,
+						contentJson,
 						msg.stopReason ?? null,
-						msg.usage ?? null,
+						usageJson,
 					],
 				);
 				inserted.push(result.rows[0]);

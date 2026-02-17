@@ -269,6 +269,21 @@ export class RemoteAgent {
 	}
 
 	/**
+	 * Load messages from storage (for resuming a session).
+	 * This updates the local state and notifies all subscribers.
+	 */
+	loadMessagesFromStorage(messages: AgentMessage[]): void {
+		this._state.messages = messages;
+		this._state.isStreaming = false;
+		this._state.streamMessage = null;
+		this._state.error = undefined;
+		// Clear pending tool calls since these are historical messages
+		this._state.pendingToolCalls = new Set();
+		// Emit state-update event to notify UI components
+		this.emit({ type: "state-update", state: this._state } as any);
+	}
+
+	/**
 	 * Start a new session.
 	 */
 	async newSession(): Promise<void> {
