@@ -26,8 +26,9 @@ import {
 import "./components/ProviderKeysPanel.js";
 import "./components/SkillsPanel.js";
 import "./components/FilesPanel.js";
+import "./components/OAuthConnectionsPanel.js";
 import { html, render } from "lit";
-import { FileUp, History, KeyRound, LogOut, Puzzle, RotateCcw, Settings, Wifi, WifiOff } from "lucide";
+import { FileUp, History, KeyRound, Link, LogOut, Puzzle, RotateCcw, Settings, Wifi, WifiOff } from "lucide";
 import { AuthClient } from "./auth/auth-client.js";
 import "./auth/login-page.js";
 import { RemoteAgent } from "./remote-agent.js";
@@ -445,10 +446,41 @@ const renderApp = () => {
 									document.body.appendChild(dialog);
 									dialog.showModal();
 									dialog.addEventListener("close", () => dialog.remove());
+									dialog.addEventListener("click", (e) => {
+										if (e.target === dialog) dialog.close();
+									});
 								},
 								title: "Provider Keys",
 							})
 						: null}
+
+					<!-- OAuth Subscriptions -->
+					${Button({
+						variant: "ghost",
+						size: "sm",
+						children: icon(Link, "sm"),
+						onClick: () => {
+							const dialog = document.createElement("dialog");
+							dialog.innerHTML = `
+								<div style="min-width: 500px; max-width: 600px; padding: 1rem;">
+									<div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 1rem;">
+										<h2 style="margin: 0; font-size: 1.125rem;">OAuth Subscriptions</h2>
+										<button onclick="this.closest('dialog').close()" style="background: none; border: none; cursor: pointer; font-size: 1.25rem;">&times;</button>
+									</div>
+									<oauth-connections-panel></oauth-connections-panel>
+								</div>
+							`;
+							const panel = dialog.querySelector("oauth-connections-panel") as any;
+							if (panel) panel.getToken = () => authClient.token;
+							document.body.appendChild(dialog);
+							dialog.showModal();
+							dialog.addEventListener("close", () => dialog.remove());
+							dialog.addEventListener("click", (e) => {
+								if (e.target === dialog) dialog.close();
+							});
+						},
+						title: "OAuth Subscriptions",
+					})}
 
 					<!-- Skills -->
 					${Button({

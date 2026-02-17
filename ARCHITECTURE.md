@@ -74,6 +74,17 @@ Provider API keys are encrypted at rest using envelope encryption:
 - **Access logging**: All decrypt operations (i.e., when a provider key is read to inject into an RPC process) are logged with `{ userId, teamId, provider, timestamp }` for audit.
 - **Local dev**: When `ENCRYPTION_ROOT_KEY` env var is set (a 256-bit hex string), it is used directly as the root key without calling an external KMS. This is acceptable for development only.
 
+## OAuth Subscription Authentication
+
+In addition to team-managed API keys, users can connect their personal LLM subscriptions (Claude Pro/Max, ChatGPT Plus/Pro) via OAuth:
+
+- **User-level credentials**: OAuth tokens are stored per-user (not per-team) using the same envelope encryption as provider keys. When spawning an agent process, user OAuth credentials override team API keys if both exist.
+- **OAuth flow**: Authorization code flow with PKCE (Proof Key for Code Exchange). The server generates a challenge, user authorizes at the provider's site, and the server exchanges the code for access/refresh tokens.
+- **Automatic refresh**: The `OAuthService` checks token expiration before each agent spawn and automatically refreshes using the stored refresh token. Refreshed tokens are re-encrypted and persisted.
+- **Supported providers**: Anthropic (Claude Pro/Max), OpenAI Codex (ChatGPT Plus/Pro). Additional providers (GitHub Copilot, Google Gemini) require device code flow or Google OAuth implementation.
+- **API endpoints**: Generic OAuth routes at `/api/oauth/:provider/{start,callback,status}` handle all providers. Provider-specific configuration (client IDs, endpoints) is centralized in `server/routes/oauth.ts`.
+- **Audit logging**: All OAuth operations (store, refresh, delete) are logged to `oauth_audit_log` with `{ userId, provider, action, timestamp }`.
+
 ## Rate Limiting & Abuse Protection
 
 All limits are configurable via team settings (admins) with platform-wide defaults.

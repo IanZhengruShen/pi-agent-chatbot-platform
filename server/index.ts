@@ -24,6 +24,7 @@ import importRouter from "./routes/import.js";
 import { createProviderKeysRouter } from "./routes/provider-keys.js";
 import { createSkillsRouter } from "./routes/skills.js";
 import { createFilesRouter } from "./routes/files.js";
+import { createOAuthRouter } from "./routes/oauth.js";
 import { requireAuth } from "./auth/middleware.js";
 import { createCryptoService } from "./services/crypto.js";
 import { ProcessPool } from "./services/process-pool.js";
@@ -62,6 +63,7 @@ async function main() {
 	app.use("/api/provider-keys", apiRateLimit, createProviderKeysRouter(crypto));
 	app.use("/api/skills", apiRateLimit, createSkillsRouter(storageService));
 	app.use("/api/files", apiRateLimit, createFilesRouter(storageService));
+	app.use("/api/oauth", apiRateLimit, createOAuthRouter(crypto));
 
 	// --- WebSocket ---
 	const server = createServer(app);

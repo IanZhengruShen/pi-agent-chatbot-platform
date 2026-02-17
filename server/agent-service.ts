@@ -17,6 +17,7 @@ import type { WebSocket } from "ws";
 import type { CryptoService } from "./services/crypto.js";
 import type { ProcessPool } from "./services/process-pool.js";
 import type { StorageService } from "./services/storage.js";
+import { OAuthService } from "./services/oauth-service.js";
 import { resolveSkillsForUser, type ResolvedSkills } from "./services/skill-resolver.js";
 import type { Database, ProviderKeyRow } from "./db/types.js";
 import { WsBridge, PROVIDER_ENV_MAP, type BridgeOptions } from "./ws-bridge.js";
@@ -76,6 +77,9 @@ export class TenantBridge extends WsBridge {
 	private async startAsync(): Promise<void> {
 		// 1. Fetch and decrypt provider keys for this team
 		await this.injectTeamKeys();
+
+		// 1a. Fetch and inject OAuth credentials for this user
+		await this.injectOAuthCredentials();
 
 		// 1b. Resolve skills for this user
 		try {
@@ -162,6 +166,37 @@ export class TenantBridge extends WsBridge {
 				);
 			} catch (err) {
 				console.error(`[tenant-bridge] Failed to decrypt key for provider ${row.provider}:`, err);
+			}
+		}
+	}
+
+	/**
+	 * Fetch OAuth credentials for the user, auto-refresh if needed, and inject into extraEnv.
+	 * OAuth credentials override team API keys if both are present.
+	 */
+	private async injectOAuthCredentials(): Promise<void> {
+		const oauthService = new OAuthService(this.db, this.crypto);
+
+		// Provider ID to environment variable mapping for OAuth providers
+		const oauthProviderEnvMap: Record<string, string> = {
+			anthropic: "ANTHROPIC_API_KEY",
+			"openai-codex": "OPENAI_API_KEY",
+			"github-copilot": "ANTHROPIC_API_KEY", // GitHub Copilot uses Anthropic backend
+			"google-gemini-cli": "GEMINI_API_KEY",
+			"google-antigravity": "GEMINI_API_KEY",
+		};
+
+		// Try to get OAuth credentials for each supported provider
+		for (const [providerId, envVar] of Object.entries(oauthProviderEnvMap)) {
+			try {
+				const apiKey = await oauthService.getApiKey(providerId as any, { userId: this.user.userId });
+				if (apiKey) {
+					this.extraEnv[envVar] = apiKey;
+					console.log(`[tenant-bridge] Using ${providerId} OAuth credentials for user ${this.user.email}`);
+				}
+			} catch (err) {
+				// Not an error if the user hasn't connected this provider
+				console.debug(`[tenant-bridge] No ${providerId} OAuth credentials for user ${this.user.email}`);
 			}
 		}
 	}
