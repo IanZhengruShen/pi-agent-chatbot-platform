@@ -10,6 +10,7 @@
 
 import { type ChildProcess, spawn } from "node:child_process";
 import * as readline from "node:readline";
+import { fileURLToPath } from "node:url";
 import type { WebSocket } from "ws";
 import { resolvePiCommand } from "./utils/resolve-command.js";
 import type { CryptoService } from "./services/crypto.js";
@@ -208,6 +209,12 @@ export class TenantBridge extends WsBridge {
 			for (const skillPath of this.resolvedSkills.skillPaths) {
 				args.push("--skill", skillPath);
 			}
+		}
+
+		// Inject platform-wide extensions
+		if (process.env.BRAVE_SEARCH_API_KEY) {
+			const braveSearchExt = fileURLToPath(new URL("./extensions/brave-search.ts", import.meta.url));
+			args.push("--extension", braveSearchExt);
 		}
 
 		console.log(`[tenant-bridge] Spawning: ${command} ${args.join(" ")}`);

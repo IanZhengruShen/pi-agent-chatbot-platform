@@ -7,6 +7,7 @@
 
 import { type ChildProcess, spawn } from "node:child_process";
 import * as readline from "node:readline";
+import { fileURLToPath } from "node:url";
 import type { WebSocket } from "ws";
 import { resolvePiCommand } from "./utils/resolve-command.js";
 import { PROVIDER_ENV_MAP } from "./utils/provider-env-map.js";
@@ -124,6 +125,12 @@ export class WsBridge {
 		}
 		if (this.options.args) {
 			args.push(...this.options.args);
+		}
+
+		// Inject platform-wide extensions
+		if (process.env.BRAVE_SEARCH_API_KEY) {
+			const braveSearchExt = fileURLToPath(new URL("./extensions/brave-search.ts", import.meta.url));
+			args.push("--extension", braveSearchExt);
 		}
 
 		console.log(`[bridge] Spawning: ${command} ${args.join(" ")}`);
