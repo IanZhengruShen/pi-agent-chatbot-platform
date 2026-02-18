@@ -14,8 +14,8 @@
 	"dependencies": {
 		"@lmstudio/sdk": "^1.5.0",
 		"@mariozechner/mini-lit": "^0.2.0",
-		"@mariozechner/pi-agent-core": "^0.52.12",
-		"@mariozechner/pi-ai": "^0.52.12",
+		"@mariozechner/pi-agent-core": "^0.53.0",
+		"@mariozechner/pi-ai": "^0.53.0",
 		"@sinclair/typebox": "^0.34.48",
 		"@tailwindcss/vite": "^4.1.17",
 		"@types/multer": "^2.0.0",
