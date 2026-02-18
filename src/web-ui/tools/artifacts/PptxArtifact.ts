@@ -6,10 +6,18 @@ import { i18n } from "../../utils/i18n.js";
 import { ArtifactElement } from "./ArtifactElement.js";
 
 interface SlideData {
-	index: number;
 	texts: string[];
 	imageBlobs: string[]; // data URLs for embedded images
 }
+
+const IMAGE_MIME: Record<string, string> = {
+	jpg: "image/jpeg",
+	jpeg: "image/jpeg",
+	png: "image/png",
+	gif: "image/gif",
+	webp: "image/webp",
+	bmp: "image/bmp",
+};
 
 @customElement("pptx-artifact")
 export class PptxArtifact extends ArtifactElement {
@@ -73,104 +81,51 @@ export class PptxArtifact extends ArtifactElement {
 		if (!this._content) return;
 
 		try {
-			const bytes = this.decodeBase64();
-			const zip = await JSZip.loadAsync(bytes);
+			const zip = await JSZip.loadAsync(this.decodeBase64());
 
-			// Find all slide XML files
+			// Find and sort slide XML files by slide number
 			const slideFiles: string[] = [];
-			zip.forEach((relativePath) => {
-				const match = relativePath.match(/^ppt\/slides\/slide(\d+)\.xml$/);
-				if (match) {
-					slideFiles.push(relativePath);
-				}
+			zip.forEach((p) => {
+				if (/^ppt\/slides\/slide\d+\.xml$/.test(p)) slideFiles.push(p);
 			});
-
-			// Sort by slide number
 			slideFiles.sort((a, b) => {
-				const numA = parseInt(a.match(/slide(\d+)/)?.[1] || "0");
-				const numB = parseInt(b.match(/slide(\d+)/)?.[1] || "0");
-				return numA - numB;
+				return parseInt(a.match(/slide(\d+)/)?.[1] || "0") - parseInt(b.match(/slide(\d+)/)?.[1] || "0");
 			});
 
-			// Build a map of relationship targets for images
-			const imageMap = new Map<string, string>(); // rId -> data URL
-
-			// Parse each slide
 			const parsedSlides: SlideData[] = [];
-			for (let i = 0; i < slideFiles.length; i++) {
-				const slideFile = slideFiles[i];
+			for (const slideFile of slideFiles) {
 				const slideXml = await zip.file(slideFile)?.async("text");
 				if (!slideXml) continue;
 
-				// Extract text from <a:t> tags
+				// Extract text grouped by paragraph (<a:p> blocks)
+				// Split XML by paragraph end tags, then extract text runs from each
 				const texts: string[] = [];
-				const textMatches = slideXml.matchAll(/<a:t[^>]*>([\s\S]*?)<\/a:t>/g);
-				let currentParagraph = "";
-				let lastMatchEnd = 0;
-
-				// Check for paragraph breaks between text runs
-				const paragraphBreaks = [...slideXml.matchAll(/<\/a:p>/g)].map((m) => m.index!);
-				let paragraphBreakIdx = 0;
-
-				for (const match of textMatches) {
-					// Check if there was a paragraph break since the last text
-					while (paragraphBreakIdx < paragraphBreaks.length && paragraphBreaks[paragraphBreakIdx] < match.index!) {
-						if (currentParagraph.trim()) {
-							texts.push(currentParagraph.trim());
-						}
-						currentParagraph = "";
-						paragraphBreakIdx++;
-					}
-					currentParagraph += match[1];
-					lastMatchEnd = match.index! + match[0].length;
-				}
-				if (currentParagraph.trim()) {
-					texts.push(currentParagraph.trim());
+				for (const paragraph of slideXml.split("</a:p>")) {
+					const runs = [...paragraph.matchAll(/<a:t[^>]*>([\s\S]*?)<\/a:t>/g)];
+					const text = runs.map((m) => m[1]).join("").trim();
+					if (text) texts.push(text);
 				}
 
-				// Try to load embedded images from slide relationships
+				// Load embedded images from slide relationships
 				const imageBlobs: string[] = [];
 				const slideNum = slideFile.match(/slide(\d+)/)?.[1];
-				const relsPath = `ppt/slides/_rels/slide${slideNum}.xml.rels`;
-				const relsXml = await zip.file(relsPath)?.async("text");
-
+				const relsXml = await zip.file(`ppt/slides/_rels/slide${slideNum}.xml.rels`)?.async("text");
 				if (relsXml) {
-					const relMatches = relsXml.matchAll(/Target="([^"]*\.(png|jpg|jpeg|gif|bmp|webp))"/gi);
-					for (const relMatch of relMatches) {
-						let imagePath = relMatch[1];
-						// Resolve relative paths
-						if (imagePath.startsWith("../")) {
-							imagePath = "ppt/" + imagePath.replace("../", "");
-						} else if (!imagePath.startsWith("ppt/")) {
-							imagePath = "ppt/slides/" + imagePath;
-						}
+					for (const m of relsXml.matchAll(/Target="([^"]*\.(png|jpg|jpeg|gif|bmp|webp))"/gi)) {
+						let imagePath = m[1];
+						if (imagePath.startsWith("../")) imagePath = "ppt/" + imagePath.replace("../", "");
+						else if (!imagePath.startsWith("ppt/")) imagePath = "ppt/slides/" + imagePath;
 
 						const imageFile = zip.file(imagePath);
 						if (imageFile) {
-							const imageData = await imageFile.async("base64");
-							const ext = relMatch[2].toLowerCase();
-							const mimeType =
-								ext === "jpg" || ext === "jpeg"
-									? "image/jpeg"
-									: ext === "png"
-										? "image/png"
-										: ext === "gif"
-											? "image/gif"
-											: ext === "webp"
-												? "image/webp"
-												: ext === "bmp"
-													? "image/bmp"
-													: "image/png";
-							imageBlobs.push(`data:${mimeType};base64,${imageData}`);
+							const data = await imageFile.async("base64");
+							const mime = IMAGE_MIME[m[2].toLowerCase()] || "image/png";
+							imageBlobs.push(`data:${mime};base64,${data}`);
 						}
 					}
 				}
 
-				parsedSlides.push({
-					index: i,
-					texts,
-					imageBlobs,
-				});
+				parsedSlides.push({ texts, imageBlobs });
 			}
 
 			this.slides = parsedSlides;

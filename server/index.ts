@@ -104,7 +104,7 @@ async function main() {
 			return res.status(400).json({ error: "Absolute path required (no active CWD)" });
 		}
 		// Only allow renderable file types
-		const ext = filePath.split(".").pop()?.toLowerCase() || "";
+		const ext = path.extname(filePath).slice(1).toLowerCase();
 		if (!RENDERABLE_EXTENSIONS.has(ext)) {
 			return res.status(400).json({ error: "Unsupported file type" });
 		}
