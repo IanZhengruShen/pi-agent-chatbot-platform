@@ -340,89 +340,82 @@ RETURNING *;
 
 ## Implementation Phases
 
-### Phase 1: Foundation
-**Goal**: Database + basic auth (placeholder) + multi-tenant session management
+### Phase 1: Foundation (Implemented)
+**Goal**: Database + basic auth + multi-tenant session management
 
-Auth approach: Start with a simple local auth (username/password or magic link) behind an auth middleware interface. The middleware is designed so Azure AD SSO can be swapped in later without changing any downstream code. All routes check `req.user` which is populated by whichever auth strategy is active.
+- PostgreSQL connection pool and migration runner (`server/db/`)
+- 6 SQL migrations covering all schema (users, teams, sessions, messages, provider keys, skills, files, OAuth, scheduler)
+- Local auth with JWT (`server/auth/local-auth.ts`, `server/auth/middleware.ts`)
+- WebSocket auth via JWT query param (`server/auth/ws-auth.ts`)
+- Role-based permissions (`server/auth/permissions.ts`)
+- Session/message CRUD API (`server/routes/sessions.ts`)
+- User/team settings API (`server/routes/settings.ts`)
+- `ApiStorageBackend` with optimistic local cache (`src/storage/api-storage-backend.ts`)
+- Browser auth client and login page (`src/auth/`)
+- Docker Compose for local dev infrastructure (`docker-compose.dev.yml`)
+- Rate limiting middleware (`server/middleware/rate-limit.ts`)
 
-Files to create/modify:
-- `server/db/` — PostgreSQL connection pool, migration runner
-- `server/db/migrations/001_initial.sql` — Schema above
-- `server/auth/middleware.ts` — Auth middleware interface (`req.user = { userId, teamId, email, role }`)
-- `server/auth/local-auth.ts` — Simple local auth (JWT-based login/register, placeholder until Azure AD)
-- `server/auth/ws-auth.ts` — WebSocket upgrade authentication (validates JWT from query param)
-- `server/auth/permissions.ts` — `requireRole('admin')` middleware + ownership check helpers
-- `server/routes/auth.ts` — Login/register endpoints (local auth)
-- `server/routes/sessions.ts` — CRUD for sessions/messages (implements what `StorageBackend` needs)
-- `server/routes/settings.ts` — User/team settings endpoints
-- `server/services/storage.ts` — `StorageService` interface with `LocalFsStorageService` implementation
-- `server/index.ts` — Add auth middleware, rate limiting middleware, mount API routes
-- `src/auth/auth-client.ts` — Browser auth client (login form, token storage, auto-attach to requests)
-- `src/storage/api-storage-backend.ts` — `StorageBackend` impl with optimistic local cache + async REST sync
-- `src/migration/export-indexeddb.ts` — One-time IndexedDB export script
-- `src/main.ts` — Add login flow, replace IndexedDB with `ApiStorageBackend`
-- `docker-compose.dev.yml` — PostgreSQL + Redis + MinIO containers for local dev
-- `.env.development` — Default connection strings for Docker Compose services
-
-**Future**: When Azure AD credentials are available, add `server/auth/azure-ad.ts` implementing the same middleware interface, and swap `src/auth/msal.ts` for the browser side. No other code changes needed.
-
-### Phase 2: Multi-Tenant Agent
+### Phase 2: Multi-Tenant Agent (Implemented)
 **Goal**: Tenant-aware agent process with server-side API key management and process lifecycle
 
-Files to create/modify:
-- `server/services/crypto.ts` — Envelope encryption utilities (KMS integration, AES-256-GCM encrypt/decrypt)
-- `server/services/process-pool.ts` — Process lifecycle manager (idle timeout, eviction, crash handling, max process cap)
-- `server/agent-service.ts` — `TenantBridge` extending `WsBridge` with user context, skill/file injection, reconnection protocol
-- `server/routes/provider-keys.ts` — Team-level provider key CRUD (envelope-encrypted, admin-only)
-- `server/index.ts` — Use `TenantBridge` in WebSocket handler, add WebSocket reconnection handling
-- Remove client-side API key management (IndexedDB `ProviderKeysStore`, `ApiKeyPromptDialog`)
+- Envelope encryption for provider keys (`server/services/crypto.ts`)
+- Process lifecycle manager (`server/services/process-pool.ts`)
+- `TenantBridge` with skill/file injection and reconnection (`server/agent-service.ts`)
+- Provider key CRUD API (`server/routes/provider-keys.ts`)
+- OAuth service for personal LLM subscriptions (`server/services/oauth-service.ts`, `server/routes/oauth.ts`)
+- Brave Search as platform-wide web_search tool (`server/extensions/brave-search.ts`)
 
-### Phase 3: Skills + Files
-**Goal**: S3-backed skill management and file upload
+### Phase 3: Skills + Files (Implemented)
+**Goal**: Skill management and file upload with local filesystem storage
 
-Files to create/modify:
-- `server/services/s3-storage.ts` — `S3StorageService` implementing `StorageService` interface
-- `server/services/skill-resolver.ts` — Resolve skills for a user: platform → team → user, download to temp dir
-- `server/routes/skills.ts` — Skill CRUD (validates SKILL.md, stores in S3 + DB, enforces authorization model)
-- `server/routes/files.ts` — File upload/download/list/delete (enforces size limits from rate limiting config)
-- `src/components/SkillsPanel.ts` — Lit.js component for skill management
-- `src/components/FilesPanel.ts` — Lit.js component for file upload/management
-- `src/main.ts` — Add navigation for skills/files panels
-- `docker-compose.dev.yml` — Add MinIO container for local S3 testing
+- `LocalFsStorageService` implementation (`server/services/storage.ts`)
+- Skill resolver: platform → team → user resolution (`server/services/skill-resolver.ts`)
+- Skill CRUD API with bundle support (`server/routes/skills.ts`)
+- File upload/download/list/delete API (`server/routes/files.ts`)
+- Skills panel UI (`src/components/SkillsPanel.ts`)
+- Files panel UI (`src/components/FilesPanel.ts`)
 
-### Phase 4: Scheduler + Delivery
+### Phase 4: Scheduler + Delivery (Implemented)
 **Goal**: Recurring job execution with result delivery
 
-Files to create/modify:
-- `server/scheduler/worker.ts` — `FOR UPDATE SKIP LOCKED` job claiming, process spawning, 5-min timeout, auto-disable after 3 failures
-- `server/scheduler/delivery.ts` — Email (Nodemailer/SMTP) + MS Teams (webhook) delivery
-- `server/routes/jobs.ts` — Job CRUD + manual trigger endpoint + run history (enforces authorization model)
-- `src/components/SchedulerPanel.ts` — Lit.js component for job management
-- Entry point for scheduler worker process (separate from main server)
+- Scheduler worker with `FOR UPDATE SKIP LOCKED` (`server/scheduler/worker.ts`)
+- Job executor with 5-min timeout (`server/scheduler/job-executor.ts`)
+- Email + Teams webhook delivery (`server/scheduler/delivery.ts`)
+- Job CRUD + run history API (`server/routes/jobs.ts`)
+- Scheduler panel UI (`src/components/SchedulerPanel.ts`)
 
-### Phase 5: Observability + Deployment
+### Phase 5: Microsoft Teams Integration (Planned)
+**Goal**: Allow registered users to interact with the agent via @mentions in Teams channels
+
+- Bot Framework adapter and webhook endpoint (`/api/teams/messages`)
+- User resolution by email (Azure AD), per-user sessions (not shared channel sessions)
+- `TeamsBridge` adapter reusing `TenantBridge` and existing RPC infrastructure
+- Progressive message updates (stream chunks to Teams)
+- Database migration for session source tracking and Teams message mapping
+- See [TEAMS-INTEGRATION.md](TEAMS-INTEGRATION.md) for full design
+
+### Phase 6: Observability + Deployment (Planned)
 **Goal**: Production readiness
 
-Files to create/modify:
-- `server/observability/langfuse.ts` — Langfuse integration wrapper for LLM calls
-- `server/services/process-pool.ts` — Add warm pool (pre-spawned idle processes)
-- `server/services/archival.ts` — Message archival job (90-day inactive → `messages_archive`)
-- `Dockerfile` — Multi-stage build for the service
-- `docker-compose.prod.yml` — Full-stack production deployment (web-api, scheduler, postgres, redis, minio, traefik)
-- `k8s/` — Deployment manifests (web-api, scheduler, Traefik IngressRoute)
-- `.env.production.template` — Production env var template with all required secrets documented
-- MindsDB tool integration (custom `AgentTool` that queries MindsDB HTTP API)
+- Langfuse/Langsmith integration for LLM call tracing
+- Warm process pool (pre-spawned idle processes)
+- Message archival (90-day inactive → `messages_archive`)
+- `Dockerfile` — Multi-stage production build
+- `docker-compose.prod.yml` — Full-stack production deployment
+- Kubernetes manifests (`k8s/`)
+- S3StorageService implementation (currently using local filesystem)
 
-## Key Existing Files to Reuse
+## Key Files
 
-| File | What to reuse |
-|------|--------------|
-| `packages/web-ui/src/storage/types.ts` | `StorageBackend` interface — implement with REST/PostgreSQL |
-| `packages/web-ui-agent/server/ws-bridge.ts` | `WsBridge` class — extend as `TenantBridge` |
-| `packages/web-ui-agent/server/index.ts` | Express server — add auth middleware + API routes |
-| `packages/coding-agent/src/core/skills.ts` | `loadSkillsFromDir()`, skill validation — works as-is with temp dirs |
-| `packages/ai/src/` | Full LLM provider abstraction — used as-is |
-| `packages/agent/src/` | Agent runtime — used as-is |
+| File | Purpose |
+|------|---------|
+| `src/storage/api-storage-backend.ts` | `StorageBackend` implementation backed by REST API with optimistic cache |
+| `server/ws-bridge.ts` | `WsBridge` class bridging WebSocket to RPC process |
+| `server/agent-service.ts` | `TenantBridge` extending `WsBridge` with multi-tenant context |
+| `server/index.ts` | Express server with auth middleware, API routes, WebSocket upgrade |
+| `server/services/skill-resolver.ts` | Skill resolution (platform → team → user) and download to temp dir |
+| `server/services/crypto.ts` | Envelope encryption for provider API keys |
+| `server/services/process-pool.ts` | Process lifecycle management (idle eviction, crash recovery) |
 
 ## Deployment
 
@@ -462,9 +455,9 @@ Scaling: ~25-30 concurrent chat sessions per pod (4GB memory, hard cap enforced 
 
 ## Verification
 
-After each phase:
-- Phase 1: Register/login with local auth → see empty session list → create session → messages persist across refresh → rate limit triggers on rapid requests → admin can access team settings, member cannot
-- Phase 2: Set provider keys in team settings (admin only) → chat works → keys not visible in browser storage → idle session process is reaped after 10 min → reconnecting to reaped session re-spawns process
-- Phase 3: Upload a skill → see it listed → start chat → agent has access to the skill. Upload a file → attach to chat → agent can read it. File size limits enforced. Works with both local filesystem and S3.
-- Phase 4: Create a scheduled job → wait for trigger → receive email/Teams notification with result → job disabled after 3 consecutive failures
-- Phase 5: Deploy to K8s → verify all flows work → check Langfuse for traces → warm pool reduces session start latency → archived sessions load on demand
+- **Phase 1** (implemented): Register/login with local auth → see empty session list → create session → messages persist across refresh → rate limit triggers on rapid requests → admin can access team settings, member cannot
+- **Phase 2** (implemented): Set provider keys in team settings (admin only) → chat works → keys not visible in browser storage → idle session process is reaped after 10 min → reconnecting to reaped session re-spawns process
+- **Phase 3** (implemented): Upload a skill → see it listed → start chat → agent has access to the skill. Upload a file → attach to chat → agent can read it. File size limits enforced.
+- **Phase 4** (implemented): Create a scheduled job → wait for trigger → receive email/Teams notification with result → job disabled after 3 consecutive failures
+- **Phase 5** (planned): Invite bot to Teams channel → @mention bot → user resolved by email → response streamed back → session persists across messages
+- **Phase 6** (planned): Deploy to K8s → verify all flows work → check Langfuse for traces → warm pool reduces session start latency → archived sessions load on demand
