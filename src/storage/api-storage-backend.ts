@@ -20,6 +20,9 @@ export class ApiStorageBackend implements StorageBackend {
 	/** Tracks which session IDs are known to exist on the server. */
 	private knownServerSessions = new Set<string>();
 
+	/** Tracks sessions currently being created (POST in-flight). */
+	private pendingCreations = new Map<string, Promise<void>>();
+
 	/**
 	 * Tracks the number of messages the server knows about per session,
 	 * so we can compute which messages are "new" during a set() call.
@@ -242,15 +245,16 @@ export class ApiStorageBackend implements StorageBackend {
 				thinkingLevel: data.thinkingLevel,
 			});
 
-			if (this.knownServerSessions.has(key)) {
-				// Session exists on server — patch metadata + batch new messages
+			if (this.knownServerSessions.has(key) || this.pendingCreations.has(key)) {
+				// Session exists (or is being created) on server — patch metadata + batch new messages
 				const handleSessionNotFound = () => {
 					console.log(`[ApiStorageBackend] Session ${key} not found on server, recreating...`);
 					this.knownServerSessions.delete(key);
+					this.pendingCreations.delete(key);
 					this.serverMessageCounts.delete(key);
 					// Create the session on the server
 					const allMessages = data.messages ?? [];
-					this.apiFetch("/api/sessions", {
+					const recreatePromise = this.apiFetch("/api/sessions", {
 						method: "POST",
 						body: JSON.stringify({
 							id: key,
@@ -262,6 +266,7 @@ export class ApiStorageBackend implements StorageBackend {
 					})
 						.then(() => {
 							this.knownServerSessions.add(key);
+							this.pendingCreations.delete(key);
 							// Now sync messages if there are any
 							if (allMessages.length > 0) {
 								this.serverMessageCounts.set(key, allMessages.length);
@@ -279,69 +284,74 @@ export class ApiStorageBackend implements StorageBackend {
 							}
 						})
 						.catch((err) => {
+							this.pendingCreations.delete(key);
 							console.error("[ApiStorageBackend] Failed to recreate session:", err);
-						});
+						}) as Promise<void>;
+					this.pendingCreations.set(key, recreatePromise);
 				};
 
-				this.apiFetch(`/api/sessions/${key}`, {
-					method: "PATCH",
-					body: JSON.stringify({
-						title: data.title,
-						thinkingLevel: data.thinkingLevel,
-						modelId: data.modelId,
-						provider: data.provider,
-					}),
-				}).catch((err) => {
-					// If session doesn't exist on server (404), recreate it
-					if (err.message?.includes("404")) {
-						handleSessionNotFound();
-					} else {
-						console.error("[ApiStorageBackend] PATCH session error:", err);
+				// Wait for any in-flight creation before syncing
+				const doSync = async () => {
+					const pending = this.pendingCreations.get(key);
+					if (pending) {
+						try { await pending; } catch { return; }
 					}
-				});
 
-				const knownCount = this.serverMessageCounts.get(key) ?? 0;
-				const allMessages = data.messages ?? [];
-				if (allMessages.length > knownCount) {
-					const newMessages = allMessages.slice(knownCount);
-					// Optimistically update count; server response confirms actual count
-					const expectedCount = allMessages.length;
-					this.serverMessageCounts.set(key, expectedCount);
-					this.apiFetch(`/api/sessions/${key}/messages/batch`, {
-						method: "POST",
+					this.apiFetch(`/api/sessions/${key}`, {
+						method: "PATCH",
 						body: JSON.stringify({
-							messages: newMessages.map((m: any) => ({
-								role: m.role,
-								content: m.content,
-								stopReason: m.stopReason ?? m.stop_reason,
-								usage: m.usage,
-							})),
+							title: data.title,
+							thinkingLevel: data.thinkingLevel,
+							modelId: data.modelId,
+							provider: data.provider,
 						}),
-					})
-						.then((res) => {
-							// Update count from server to stay in sync
-							if (res?.data?.messages) {
-								this.serverMessageCounts.set(key, knownCount + res.data.messages.length);
-							}
+					}).catch((err) => {
+						if (err.message?.includes("404")) {
+							handleSessionNotFound();
+						} else {
+							console.error("[ApiStorageBackend] PATCH session error:", err);
+						}
+					});
+
+					const knownCount = this.serverMessageCounts.get(key) ?? 0;
+					const allMessages = data.messages ?? [];
+					if (allMessages.length > knownCount) {
+						const newMessages = allMessages.slice(knownCount);
+						const expectedCount = allMessages.length;
+						this.serverMessageCounts.set(key, expectedCount);
+						this.apiFetch(`/api/sessions/${key}/messages/batch`, {
+							method: "POST",
+							body: JSON.stringify({
+								messages: newMessages.map((m: any) => ({
+									role: m.role,
+									content: m.content,
+									stopReason: m.stopReason ?? m.stop_reason,
+									usage: m.usage,
+								})),
+							}),
 						})
-						.catch((err) => {
-							// If session doesn't exist (404), recreate it
-							if (err.message?.includes("404")) {
-								handleSessionNotFound();
-							} else {
-								// Rollback count on other failures so retry sends the same messages
-								console.error("[ApiStorageBackend] batch sync failed:", err);
-								this.serverMessageCounts.set(key, knownCount);
-							}
-						});
-				}
+							.then((res) => {
+								if (res?.data?.messages) {
+									this.serverMessageCounts.set(key, knownCount + res.data.messages.length);
+								}
+							})
+							.catch((err) => {
+								if (err.message?.includes("404")) {
+									handleSessionNotFound();
+								} else {
+									console.error("[ApiStorageBackend] batch sync failed:", err);
+									this.serverMessageCounts.set(key, knownCount);
+								}
+							});
+					}
+				};
+				doSync();
 			} else {
 				// New session — create on server
-				this.knownServerSessions.add(key);
 				const allMessages = data.messages ?? [];
 				this.serverMessageCounts.set(key, allMessages.length);
 
-				this.apiFetch("/api/sessions", {
+				const createPromise = this.apiFetch("/api/sessions", {
 					method: "POST",
 					body: JSON.stringify({
 						id: key, // Send client-generated ID so server uses it
@@ -352,6 +362,8 @@ export class ApiStorageBackend implements StorageBackend {
 					}),
 				})
 					.then(() => {
+						this.knownServerSessions.add(key);
+						this.pendingCreations.delete(key);
 						// Session created successfully, now sync messages if any
 						if (allMessages.length > 0) {
 							return this.apiFetch(`/api/sessions/${key}/messages/batch`, {
@@ -368,8 +380,10 @@ export class ApiStorageBackend implements StorageBackend {
 						}
 					})
 					.catch((err) => {
+						this.pendingCreations.delete(key);
 						console.error("[ApiStorageBackend] create session sync error:", err);
-					});
+					}) as Promise<void>;
+				this.pendingCreations.set(key, createPromise);
 			}
 			return;
 		}

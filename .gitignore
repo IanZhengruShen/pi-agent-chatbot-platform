@@ -23,3 +23,15 @@ data/
 # Package
 .npm/
 coverage/
+
+# Agent-generated test artifacts and stray files (root-level only)
+/-
+/*.pptx
+/*.xlsx
+/*.xls
+/*.docx
+/*.pdf
+/plotly-example.html
+/TEAMS-INTEGRATION.md
+/agent-skills-slides.md
+/layman_talk_slides.md
