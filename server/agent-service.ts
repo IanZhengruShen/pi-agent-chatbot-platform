@@ -16,11 +16,10 @@ import { resolvePiCommand } from "./utils/resolve-command.js";
 import type { CryptoService } from "./services/crypto.js";
 import type { ProcessPool } from "./services/process-pool.js";
 import type { StorageService } from "./services/storage.js";
-import { OAuthService } from "./services/oauth-service.js";
 import { resolveSkillsForUser, type ResolvedSkills } from "./services/skill-resolver.js";
-import type { Database, ProviderKeyRow } from "./db/types.js";
+import { AgentExecutor } from "./services/agent-executor.js";
+import type { Database } from "./db/types.js";
 import { WsBridge, type BridgeOptions } from "./ws-bridge.js";
-import { PROVIDER_ENV_MAP, OAUTH_PROVIDER_ENV_MAP } from "./utils/provider-env-map.js";
 
 export interface AuthUser {
 	userId: string;
@@ -75,11 +74,20 @@ export class TenantBridge extends WsBridge {
 	}
 
 	private async startAsync(): Promise<void> {
-		// 1. Fetch and decrypt provider keys for this team
-		await this.injectTeamKeys();
+		// 1. Fetch and inject provider keys + OAuth credentials
+		const agentExecutor = new AgentExecutor({ db: this.db, crypto: this.crypto, storage: this.storage });
+		const envKeys = await agentExecutor.buildEnv(this.user.userId, this.user.teamId);
+		Object.assign(this.extraEnv, envKeys);
 
-		// 1a. Fetch and inject OAuth credentials for this user
-		await this.injectOAuthCredentials();
+		// Audit log: record key decryption for each provider
+		for (const key of Object.keys(envKeys)) {
+			// Best-effort audit logging (non-blocking)
+			this.db.query(
+				`INSERT INTO provider_key_audit_log (team_id, user_id, provider, action)
+				 VALUES ($1, $2, $3, 'decrypt')`,
+				[this.user.teamId, this.user.userId, key],
+			).catch(() => {});
+		}
 
 		// 1b. Resolve skills for this user
 		try {
@@ -134,61 +142,6 @@ export class TenantBridge extends WsBridge {
 				this.process.stdin.write(msg + "\n");
 			}
 			this.pendingMessages = [];
-		}
-	}
-
-	/**
-	 * Fetch provider_keys for the team, decrypt them, and inject into extraEnv.
-	 */
-	private async injectTeamKeys(): Promise<void> {
-		const result = await this.db.query<ProviderKeyRow>(
-			`SELECT * FROM provider_keys WHERE team_id = $1`,
-			[this.user.teamId],
-		);
-
-		for (const row of result.rows) {
-			try {
-				const apiKey = this.crypto.decrypt({
-					encryptedDek: row.encrypted_dek,
-					encryptedData: row.encrypted_key,
-					iv: row.iv,
-					keyVersion: row.key_version,
-				});
-
-				const envVar = PROVIDER_ENV_MAP[row.provider] || `${row.provider.toUpperCase().replace(/-/g, "_")}_API_KEY`;
-				this.extraEnv[envVar] = apiKey;
-
-				// Audit log: record decrypt
-				await this.db.query(
-					`INSERT INTO provider_key_audit_log (team_id, user_id, provider, action)
-					 VALUES ($1, $2, $3, 'decrypt')`,
-					[this.user.teamId, this.user.userId, row.provider],
-				);
-			} catch (err) {
-				console.error(`[tenant-bridge] Failed to decrypt key for provider ${row.provider}:`, err);
-			}
-		}
-	}
-
-	/**
-	 * Fetch OAuth credentials for the user, auto-refresh if needed, and inject into extraEnv.
-	 * OAuth credentials override team API keys if both are present.
-	 */
-	private async injectOAuthCredentials(): Promise<void> {
-		const oauthService = new OAuthService(this.db, this.crypto);
-
-		// Try to get OAuth credentials for each supported provider
-		for (const [providerId, envVar] of Object.entries(OAUTH_PROVIDER_ENV_MAP)) {
-			try {
-				const apiKey = await oauthService.getApiKey(providerId as any, { userId: this.user.userId });
-				if (apiKey) {
-					this.extraEnv[envVar] = apiKey;
-					console.log(`[tenant-bridge] Using ${providerId} OAuth credentials for user ${this.user.email}`);
-				}
-			} catch (err) {
-				// Not an error if the user hasn't connected this provider
-				console.debug(`[tenant-bridge] No ${providerId} OAuth credentials for user ${this.user.email}`);
-			}
 		}
 	}
 

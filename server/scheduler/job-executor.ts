@@ -11,18 +11,12 @@
  * - Graceful termination (SIGTERM → SIGKILL)
  */
 
-import { type ChildProcess, spawn } from "node:child_process";
-import * as fs from "node:fs/promises";
-import * as os from "node:os";
-import * as path from "node:path";
+import { type ChildProcess } from "node:child_process";
 import * as readline from "node:readline";
-import { resolvePiCommand } from "../utils/resolve-command.js";
-import { PROVIDER_ENV_MAP, OAUTH_PROVIDER_ENV_MAP } from "../utils/provider-env-map.js";
-import type { Database, ProviderKeyRow, ScheduledJobRow, UserFileRow } from "../db/types.js";
+import type { Database, ScheduledJobRow } from "../db/types.js";
 import type { CryptoService } from "../services/crypto.js";
 import type { StorageService } from "../services/storage.js";
-import { OAuthService } from "../services/oauth-service.js";
-import { resolveSkillsForUser, type ResolvedSkills } from "../services/skill-resolver.js";
+import { AgentExecutor } from "../services/agent-executor.js";
 
 export interface JobExecutionResult {
 	status: "success" | "failed" | "timeout";
@@ -43,9 +37,9 @@ export async function executeJob(
 	storage: StorageService,
 	crypto: CryptoService,
 ): Promise<JobExecutionResult> {
-	let tempDir: string | null = null;
-	let resolvedSkills: ResolvedSkills | null = null;
-	let process: ChildProcess | null = null;
+	const executor = new AgentExecutor({ db, crypto, storage });
+	let spawnResult: Awaited<ReturnType<AgentExecutor["spawn"]>> | null = null;
+	let childProcess: ChildProcess | null = null;
 
 	try {
 		// 1. Fetch the user who created the job (to determine team context)
@@ -58,79 +52,19 @@ export async function executeJob(
 		}
 		const user = userResult.rows[0];
 
-		// 2. Resolve skills for the user
-		resolvedSkills = await resolveSkillsForUser(db, storage, user.id, user.team_id);
-
-		// 3. Download user files to temp directory
-		const filePaths: string[] = [];
-		if (job.file_ids && job.file_ids.length > 0) {
-			tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-job-files-"));
-
-			const fileResult = await db.query<UserFileRow>(
-				`SELECT id, filename, storage_key FROM user_files WHERE id = ANY($1)`,
-				[job.file_ids],
-			);
-
-			for (const file of fileResult.rows) {
-				const filePath = path.join(tempDir, file.filename);
-				const data = await storage.download(file.storage_key);
-				await fs.writeFile(filePath, data);
-				filePaths.push(filePath);
-			}
-		}
-
-		// 4. Build environment with provider keys
-		const env = { ...process.env };
-
-		// 4a. Inject team-level provider keys
-		const keyResult = await db.query<ProviderKeyRow>(
-			`SELECT provider, encrypted_dek, encrypted_key, iv, key_version FROM provider_keys WHERE team_id = $1`,
-			[user.team_id],
-		);
-
-		for (const row of keyResult.rows) {
-			try {
-				const apiKey = crypto.decrypt({
-					encryptedDek: row.encrypted_dek,
-					encryptedData: row.encrypted_key,
-					iv: row.iv,
-					keyVersion: row.key_version,
-				});
-
-				const envVar = PROVIDER_ENV_MAP[row.provider] || `${row.provider.toUpperCase().replace(/-/g, "_")}_API_KEY`;
-				env[envVar] = apiKey;
-			} catch (err) {
-				console.error(`[job-executor] Failed to decrypt key for provider ${row.provider}:`, err);
-			}
-		}
-
-		// 4b. Inject OAuth credentials (overrides team keys)
-		const oauthService = new OAuthService(db, crypto);
-		for (const [providerId, envVar] of Object.entries(OAUTH_PROVIDER_ENV_MAP)) {
-			try {
-				const apiKey = await oauthService.getApiKey(providerId as any, { userId: user.id });
-				if (apiKey) {
-					env[envVar] = apiKey;
-				}
-			} catch {
-				// No OAuth credentials for this provider - ignore
-			}
-		}
-
-		// 5. Build command args
-		const { command, args } = buildJobArgs(job, resolvedSkills, filePaths);
-
-		console.log(`[job-executor] Spawning job ${job.id}: ${command} ${args.join(" ")}`);
-
-		// 6. Spawn process
-		process = spawn(command, args, {
-			cwd: process.cwd(),
-			env,
-			stdio: ["pipe", "pipe", "pipe"],
+		// 2. Spawn via AgentExecutor (resolves keys, skills, files)
+		console.log(`[job-executor] Spawning job ${job.id}`);
+		spawnResult = await executor.spawn({
+			userId: user.id,
+			teamId: user.team_id,
+			provider: job.provider || undefined,
+			model: job.model_id || undefined,
+			fileIds: job.file_ids || undefined,
 		});
+		childProcess = spawnResult.process;
 
-		// 7. Execute with timeout
-		const result = await executeWithTimeout(process, job.prompt, JOB_EXECUTION_TIMEOUT_MS);
+		// 3. Execute with timeout
+		const result = await executeWithTimeout(childProcess, job.prompt, JOB_EXECUTION_TIMEOUT_MS);
 
 		return result;
 	} catch (err: any) {
@@ -140,47 +74,13 @@ export async function executeJob(
 			error: err.message || String(err),
 		};
 	} finally {
-		// Cleanup
-		if (process && !process.killed) {
-			await terminateProcess(process, 5000);
+		if (childProcess && !childProcess.killed) {
+			await terminateProcess(childProcess, 5000);
 		}
-		if (resolvedSkills) {
-			resolvedSkills.cleanup();
-		}
-		if (tempDir) {
-			await fs.rm(tempDir, { recursive: true, force: true }).catch(() => {});
+		if (spawnResult) {
+			await spawnResult.cleanup();
 		}
 	}
-}
-
-/**
- * Resolve the command and args for spawning pi --mode rpc.
- */
-function buildJobArgs(
-	job: ScheduledJobRow,
-	resolvedSkills: ResolvedSkills | null,
-	filePaths: string[],
-): { command: string; args: string[] } {
-	const { command, commandArgs } = resolvePiCommand();
-	const args = [...commandArgs, "--mode", "rpc"];
-
-	// Add provider and model if specified
-	if (job.provider) args.push("--provider", job.provider);
-	if (job.model_id) args.push("--model", job.model_id);
-
-	// Add skills
-	if (resolvedSkills) {
-		for (const skillPath of resolvedSkills.skillPaths) {
-			args.push("--skill", skillPath);
-		}
-	}
-
-	// Add files
-	for (const filePath of filePaths) {
-		args.push("--file", filePath);
-	}
-
-	return { command, args };
 }
 
 /**

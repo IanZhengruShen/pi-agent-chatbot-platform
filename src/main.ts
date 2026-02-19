@@ -28,6 +28,7 @@ import "./components/SkillsPanel.js";
 import "./components/FilesPanel.js";
 import "./components/OAuthConnectionsPanel.js";
 import "./components/SchedulerPanel.js";
+import "./components/TasksDashboard.js";
 import { html, render, nothing } from "lit";
 import {
 	Calendar,
@@ -35,6 +36,7 @@ import {
 	FileUp,
 	KeyRound,
 	Link,
+	ListTodo,
 	LogOut,
 	MessageSquare,
 	PanelLeft,
@@ -794,6 +796,22 @@ const renderApp = () => {
 											<span>Provider Keys</span>
 										</button>
 									` : nothing}
+									<button class="w-full flex items-center gap-2 px-3 py-2 text-sm hover:bg-muted transition-colors text-left cursor-pointer" @click=${() => {
+										toolsMenuOpen = false;
+										openDialog({
+											title: "Background Tasks",
+											tag: "tasks-dashboard",
+											style: "max-width: 900px; width: 90vw; padding: 1.5rem; border: 1px solid var(--border); border-radius: 0.5rem; background: var(--background);",
+											setup: (panel) => {
+												panel.getToken = () => authClient.token;
+												panel.userRole = user?.role || "member";
+											},
+										});
+										renderApp();
+									}}>
+										${icon(ListTodo, "sm")}
+										<span>Background Tasks</span>
+									</button>
 									<button class="w-full flex items-center gap-2 px-3 py-2 text-sm hover:bg-muted transition-colors text-left cursor-pointer" @click=${() => {
 										toolsMenuOpen = false;
 										openDialog({

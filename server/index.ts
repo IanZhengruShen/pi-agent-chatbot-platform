@@ -27,10 +27,14 @@ import { createSkillsRouter } from "./routes/skills.js";
 import { createFilesRouter } from "./routes/files.js";
 import { createOAuthRouter } from "./routes/oauth.js";
 import { createJobsRouter } from "./routes/jobs.js";
+import { createTasksRouter } from "./routes/tasks.js";
 import { requireAuth } from "./auth/middleware.js";
 import { createCryptoService } from "./services/crypto.js";
 import { ProcessPool } from "./services/process-pool.js";
 import { createStorageService } from "./services/storage.js";
+import { AgentExecutor } from "./services/agent-executor.js";
+import { ArtifactCollector } from "./services/artifact-collector.js";
+import { TaskQueueService } from "./services/task-queue.js";
 import { TenantBridge, type TenantBridgeOptions } from "./agent-service.js";
 import type { BridgeOptions } from "./ws-bridge.js";
 import { RENDERABLE_EXTENSIONS, BINARY_EXTENSIONS } from "../src/shared/file-extensions.js";
@@ -47,15 +51,19 @@ async function main() {
 	const crypto = createCryptoService();
 	const processPool = new ProcessPool();
 	const storageService = createStorageService();
+	const agentExecutor = new AgentExecutor({ db, crypto, storage: storageService });
+	const artifactCollector = new ArtifactCollector(db, storageService);
+	const taskQueueService = new TaskQueueService(db, storageService, agentExecutor, artifactCollector);
+	await taskQueueService.start();
 
 	const app = express();
 
 	// Body parsing
 	app.use(express.json());
 
-	// Health check (no auth required) — includes process pool stats
+	// Health check (no auth required) — includes process pool and task queue stats
 	app.get("/healthz", (_req, res) => {
-		res.json({ status: "ok", processPool: processPool.stats() });
+		res.json({ status: "ok", processPool: processPool.stats(), taskQueue: taskQueueService.stats() });
 	});
 
 	// Track active CWDs per user (for agent-files endpoint)
@@ -71,6 +79,7 @@ async function main() {
 	app.use("/api/files", apiRateLimit, createFilesRouter(storageService));
 	app.use("/api/oauth", apiRateLimit, createOAuthRouter(crypto));
 	app.use("/api/jobs", apiRateLimit, createJobsRouter(storageService, crypto));
+	app.use("/api/tasks", apiRateLimit, createTasksRouter(storageService, crypto, taskQueueService));
 
 	// Read files from the agent's working directory (for rendering artifacts)
 	app.get("/api/agent-files", requireAuth, apiRateLimit, async (req, res) => {
@@ -233,6 +242,7 @@ async function main() {
 	// Graceful shutdown
 	const gracefulShutdown = async (signal: string) => {
 		console.log(`[server] Received ${signal}, shutting down gracefully...`);
+		await taskQueueService.shutdown();
 		await processPool.shutdown();
 		server.close(() => {
 			console.log("[server] HTTP server closed");

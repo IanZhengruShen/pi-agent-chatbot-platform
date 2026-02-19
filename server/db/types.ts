@@ -129,3 +129,38 @@ export interface JobRunRow {
 	delivery_status: "pending" | "sent" | "failed" | null;
 	delivery_error: string | null;
 }
+
+export interface TaskRow {
+	id: string;
+	user_id: string;
+	team_id: string;
+	prompt: string;
+	skill_ids: string[] | null;
+	file_ids: string[] | null;
+	model_id: string | null;
+	provider: string | null;
+	status: "pending" | "claimed" | "running" | "success" | "failed" | "cancelled" | "timeout";
+	progress: { percent?: number; message?: string };
+	output: string | null;
+	error: string | null;
+	usage: any | null;
+	cwd_path: string | null;
+	delivery: { type: "email"; to: string } | { type: "teams"; webhook: string } | null;
+	parent_task_id: string | null;
+	cancel_requested: boolean;
+	worker_pid: number | null;
+	created_at: Date;
+	claimed_at: Date | null;
+	started_at: Date | null;
+	finished_at: Date | null;
+}
+
+export interface TaskArtifactRow {
+	id: string;
+	task_id: string;
+	filename: string;
+	content_type: string | null;
+	size_bytes: number | null;
+	storage_key: string;
+	created_at: Date;
+}
