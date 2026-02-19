@@ -15,14 +15,14 @@ import { ArtifactCollector } from "./artifact-collector.js";
 import { deliverResult } from "../scheduler/delivery.js";
 
 export interface TaskProgressEvent {
-	type: "progress" | "output" | "complete" | "error" | "cancelled";
+	type: "progress" | "output" | "complete" | "task_error" | "cancelled";
 	taskId: string;
 	data: any;
 }
 
 const POLL_INTERVAL_MS = parseInt(process.env.TASK_QUEUE_POLL_INTERVAL_MS || "5000", 10);
 const MAX_CONCURRENT = parseInt(process.env.TASK_QUEUE_MAX_CONCURRENT || "10", 10);
-const EXECUTION_TIMEOUT_MS = parseInt(process.env.TASK_EXECUTION_TIMEOUT_MS || "600000", 10); // 10 min
+const EXECUTION_TIMEOUT_MS = parseInt(process.env.TASK_EXECUTION_TIMEOUT_MS || "1800000", 10); // 30 min
 const PROGRESS_DB_DEBOUNCE_MS = 5000;
 
 export class TaskQueueService {
@@ -283,7 +283,7 @@ export class TaskQueueService {
 				);
 
 				this.emit(task.id, {
-					type: "error",
+					type: "task_error",
 					taskId: task.id,
 					data: { error: result.error, status: result.status },
 				});
@@ -296,12 +296,16 @@ export class TaskQueueService {
 			).catch(() => {});
 
 			this.emit(task.id, {
-				type: "error",
+				type: "task_error",
 				taskId: task.id,
 				data: { error: err.message || String(err), status: "failed" },
 			});
 		} finally {
 			this.activeExecutions.delete(task.id);
+			// Kill the process if still running (it stays alive in RPC mode)
+			if (spawnResult && !spawnResult.process.killed) {
+				spawnResult.process.kill("SIGTERM");
+			}
 			if (spawnResult) {
 				await spawnResult.cleanup();
 			}
@@ -323,12 +327,21 @@ export class TaskQueueService {
 			let error = "";
 			let usage: any = null;
 			let timedOut = false;
+			let resolved = false;
 			let lastProgressWrite = 0;
+			const toolCallNames = new Map<string, string>();
+
+			const done = (result: { status: "success" | "failed" | "timeout"; output?: string; error?: string; usage?: any }) => {
+				if (resolved) return;
+				resolved = true;
+				clearTimeout(timer);
+				resolve(result);
+			};
 
 			const timer = setTimeout(() => {
 				timedOut = true;
 				try { child.kill("SIGTERM"); } catch {}
-				resolve({ status: "timeout", error: "Task exceeded timeout" });
+				done({ status: "timeout", error: "Task exceeded timeout" });
 			}, EXECUTION_TIMEOUT_MS);
 
 			// Read stdout (RPC JSON lines)
@@ -338,27 +351,52 @@ export class TaskQueueService {
 					try {
 						const msg = JSON.parse(line);
 
-						if (msg.type === "text" && msg.role === "assistant") {
-							output += msg.text;
-							// Emit progress with output snippet
-							this.emit(task.id, {
-								type: "output",
-								taskId: task.id,
-								data: { text: msg.text },
-							});
+						// Diagnostic logging — mirrors [rpc→ws] in agent-service.ts
+						console.log(`[task-queue] [${task.id.slice(0, 8)}] rpc→ ${msg.type || "unknown"}`);
+
+						// Collect streaming text and track tool call names from message_update
+						if (msg.type === "message_update" && msg.message?.content) {
+							let fullText = "";
+							for (const block of msg.message.content) {
+								if (block.type === "text") {
+									fullText += block.text;
+								} else if (block.type === "toolCall" && block.id && block.name) {
+									toolCallNames.set(block.id, block.name);
+								}
+							}
+							if (fullText && fullText !== output) {
+								output = fullText;
+								this.emit(task.id, {
+									type: "output",
+									taskId: task.id,
+									data: { text: fullText },
+								});
+								// Progress: last non-empty line as snippet
+								const lastLine = fullText.split("\n").filter(Boolean).pop() || "";
+								const snippet = lastLine.length > 120 ? lastLine.slice(0, 120) + "..." : lastLine;
+								const progressData = { message: snippet };
+								this.emit(task.id, { type: "progress", taskId: task.id, data: progressData });
+
+								const now = Date.now();
+								if (now - lastProgressWrite >= PROGRESS_DB_DEBOUNCE_MS) {
+									lastProgressWrite = now;
+									this.db.query(
+										`UPDATE tasks SET progress = $1 WHERE id = $2`,
+										[JSON.stringify(progressData), task.id],
+									).catch(() => {});
+								}
+							}
 						}
 
-						if (msg.type === "usage") {
-							usage = msg.usage;
+						// Collect usage from message_end
+						if (msg.type === "message_end" && msg.message?.role === "assistant" && msg.message.usage) {
+							usage = msg.message.usage;
 						}
 
-						if (msg.type === "error") {
-							error += msg.message || JSON.stringify(msg);
-						}
-
-						// Emit progress events (debounced DB writes)
-						if (msg.type === "progress" || msg.type === "status") {
-							const progressData = { percent: msg.percent, message: msg.message || msg.status };
+						// Tool execution start — show tool name as progress
+						if (msg.type === "tool_execution_start" && msg.toolCallId) {
+							const toolName = toolCallNames.get(msg.toolCallId) || "tool";
+							const progressData = { message: `Running ${toolName}...` };
 							this.emit(task.id, { type: "progress", taskId: task.id, data: progressData });
 
 							const now = Date.now();
@@ -370,8 +408,45 @@ export class TaskQueueService {
 								).catch(() => {});
 							}
 						}
+
+						// agent_end signals task complete
+						if (msg.type === "agent_end") {
+							done({ status: "success", output: output || "Task completed successfully", usage });
+						}
+
+						// Error: prompt command failed (e.g. missing API key, invalid model)
+						if (msg.type === "response" && msg.success === false) {
+							done({ status: "failed", error: msg.error || "Prompt command rejected by agent" });
+						}
+
+						// Error: turn ended with an error message
+						if (msg.type === "turn_end" && msg.message?.errorMessage) {
+							error = msg.message.errorMessage;
+						}
+
+						// Auto-respond to extension_ui_request so the process doesn't hang
+						if (msg.type === "extension_ui_request" && child.stdin) {
+							const { id, method } = msg;
+							console.log(`[task-queue] [${task.id.slice(0, 8)}] auto-responding to extension_ui_request: ${method}`);
+							let response: any;
+							if (method === "confirm") {
+								response = { type: "extension_ui_response", id, confirmed: true };
+							} else if (method === "select" && msg.options?.length > 0) {
+								response = { type: "extension_ui_response", id, value: msg.options[0] };
+							} else if (method === "input") {
+								response = { type: "extension_ui_response", id, cancelled: true };
+							} else {
+								// notify, setStatus, setTitle — no response needed
+								// For unknown methods, cancel to unblock
+								response = { type: "extension_ui_response", id, cancelled: true };
+							}
+							if (response) {
+								child.stdin.write(JSON.stringify(response) + "\n");
+							}
+						}
 					} catch {
 						// Non-JSON output
+						console.log(`[task-queue] [${task.id.slice(0, 8)}] non-json stdout: ${line.slice(0, 200)}`);
 					}
 				});
 			}
@@ -385,29 +460,24 @@ export class TaskQueueService {
 
 			// Handle process exit
 			child.on("exit", (code) => {
-				clearTimeout(timer);
 				if (timedOut) return;
-
 				if (code === 0) {
-					resolve({ status: "success", output: output || "Task completed successfully", usage });
+					done({ status: "success", output: output || "Task completed successfully", usage });
 				} else {
-					resolve({ status: "failed", error: error || `Process exited with code ${code}` });
+					done({ status: "failed", error: error || `Process exited with code ${code}` });
 				}
 			});
 
 			child.on("error", (err) => {
-				clearTimeout(timer);
-				if (!timedOut) {
-					resolve({ status: "failed", error: `Failed to spawn process: ${err.message}` });
-				}
+				done({ status: "failed", error: `Failed to spawn process: ${err.message}` });
 			});
 
-			// Send the prompt
+			// Send prompt using pi RPC protocol format
 			if (child.stdin) {
 				const message = JSON.stringify({
-					type: "message",
-					role: "user",
-					content: task.prompt,
+					type: "prompt",
+					id: `task-${task.id}`,
+					message: task.prompt,
 				});
 				child.stdin.write(message + "\n");
 			}

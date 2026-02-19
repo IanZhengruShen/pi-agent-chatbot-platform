@@ -150,6 +150,15 @@ export class TasksDashboard extends LitElement {
 			border-radius: 2px;
 			transition: width 0.3s ease;
 		}
+		.progress-fill.indeterminate {
+			width: 30%;
+			animation: indeterminate 1.5s ease-in-out infinite;
+		}
+		@keyframes indeterminate {
+			0% { margin-left: 0; }
+			50% { margin-left: 70%; }
+			100% { margin-left: 0; }
+		}
 		.progress-message {
 			font-size: 0.75rem;
 			color: var(--muted-foreground, #6b7280);
@@ -393,8 +402,12 @@ export class TasksDashboard extends LitElement {
 			});
 		});
 
-		es.addEventListener("output", (_e) => {
-			// Output chunks — could accumulate if needed
+		es.addEventListener("output", (e) => {
+			const data = JSON.parse((e as MessageEvent).data);
+			// output events send the full current text (replaces previous value)
+			this.updateTaskInList(taskId, {
+				output: data.text || "",
+			});
 		});
 
 		es.addEventListener("complete", (e) => {
@@ -411,14 +424,12 @@ export class TasksDashboard extends LitElement {
 			this.disconnectSse(taskId);
 		});
 
-		es.addEventListener("error", (e) => {
-			if ((e as MessageEvent).data) {
-				const data = JSON.parse((e as MessageEvent).data);
-				this.updateTaskInList(taskId, {
-					status: data.status || "failed",
-					error: data.error,
-				});
-			}
+		es.addEventListener("task_error", (e) => {
+			const data = JSON.parse((e as MessageEvent).data);
+			this.updateTaskInList(taskId, {
+				status: data.status || "failed",
+				error: data.error,
+			});
 			this.disconnectSse(taskId);
 		});
 
@@ -608,9 +619,11 @@ export class TasksDashboard extends LitElement {
 					${artifacts.length > 0 ? html`<span>${artifacts.length} artifact${artifacts.length > 1 ? "s" : ""}</span>` : ""}
 				</div>
 
-				${isActive && task.progress?.percent !== undefined ? html`
+				${isActive ? html`
 					<div class="progress-bar">
-						<div class="progress-fill" style="width: ${task.progress.percent}%"></div>
+						${task.progress?.percent !== undefined
+							? html`<div class="progress-fill" style="width: ${task.progress.percent}%"></div>`
+							: html`<div class="progress-fill indeterminate"></div>`}
 					</div>
 				` : ""}
 				${isActive && task.progress?.message ? html`

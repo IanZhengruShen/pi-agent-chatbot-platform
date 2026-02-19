@@ -26,7 +26,7 @@ export interface JobExecutionResult {
 }
 
 
-const JOB_EXECUTION_TIMEOUT_MS = parseInt(process.env.JOB_EXECUTION_TIMEOUT_MS || "300000", 10); // 5 minutes
+const JOB_EXECUTION_TIMEOUT_MS = parseInt(process.env.JOB_EXECUTION_TIMEOUT_MS || "1800000", 10); // 30 minutes
 
 /**
  * Execute a scheduled job by spawning a pi --mode rpc process.
@@ -87,7 +87,7 @@ export async function executeJob(
  * Execute the prompt with timeout and collect output.
  */
 async function executeWithTimeout(
-	process: ChildProcess,
+	childProcess: ChildProcess,
 	prompt: string,
 	timeoutMs: number,
 ): Promise<JobExecutionResult> {
@@ -96,32 +96,85 @@ async function executeWithTimeout(
 		let error = "";
 		let usage: any = null;
 		let timedOut = false;
+		let resolved = false;
+		const toolCallNames = new Map<string, string>();
+
+		const done = (result: JobExecutionResult) => {
+			if (resolved) return;
+			resolved = true;
+			clearTimeout(timer);
+			resolve(result);
+		};
 
 		const timer = setTimeout(() => {
 			timedOut = true;
-			resolve({ status: "timeout", error: "Job execution exceeded 5 minute timeout" });
+			done({ status: "timeout", error: "Job execution exceeded 5 minute timeout" });
 		}, timeoutMs);
 
 		// Read stdout (RPC responses)
-		if (process.stdout) {
-			const rl = readline.createInterface({ input: process.stdout });
+		if (childProcess.stdout) {
+			const rl = readline.createInterface({ input: childProcess.stdout });
 			rl.on("line", (line) => {
 				try {
 					const msg = JSON.parse(line);
 
-					// Collect assistant output
-					if (msg.type === "text" && msg.role === "assistant") {
-						output += msg.text;
+					// Diagnostic logging
+					console.log(`[job-executor] rpc→ ${msg.type || "unknown"}`);
+
+					// Collect streaming text and track tool call names
+					if (msg.type === "message_update" && msg.message?.content) {
+						let fullText = "";
+						for (const block of msg.message.content) {
+							if (block.type === "text") {
+								fullText += block.text;
+							} else if (block.type === "toolCall" && block.id && block.name) {
+								toolCallNames.set(block.id, block.name);
+							}
+						}
+						if (fullText) output = fullText;
 					}
 
-					// Collect usage stats
-					if (msg.type === "usage") {
-						usage = msg.usage;
+					// Collect usage from message_end
+					if (msg.type === "message_end" && msg.message?.role === "assistant" && msg.message.usage) {
+						usage = msg.message.usage;
 					}
 
-					// Check for errors
-					if (msg.type === "error") {
-						error += msg.message || JSON.stringify(msg);
+					// agent_end signals completion
+					if (msg.type === "agent_end") {
+						done({
+							status: "success",
+							output: output || "Job completed successfully",
+							usage,
+						});
+					}
+
+					// Error: prompt command failed (e.g. missing API key)
+					if (msg.type === "response" && msg.success === false) {
+						done({ status: "failed", error: msg.error || "Prompt command rejected by agent" });
+					}
+
+					// Error: turn ended with an error message
+					if (msg.type === "turn_end" && msg.message?.errorMessage) {
+						error = msg.message.errorMessage;
+					}
+
+					// Auto-respond to extension_ui_request so the process doesn't hang
+					if (msg.type === "extension_ui_request" && childProcess.stdin) {
+						const { id, method } = msg;
+						console.log(`[job-executor] auto-responding to extension_ui_request: ${method}`);
+						let response: any;
+						if (method === "confirm") {
+							response = { type: "extension_ui_response", id, confirmed: true };
+						} else if (method === "select" && msg.options?.length > 0) {
+							response = { type: "extension_ui_response", id, value: msg.options[0] };
+						} else if (method === "input") {
+							response = { type: "extension_ui_response", id, cancelled: true };
+						} else {
+							response = { type: "extension_ui_response", id, cancelled: true };
+						}
+						if (response) {
+							childProcess.stdin.write(JSON.stringify(response) + "\n");
+						}
 					}
 				} catch {
 					// Not JSON - might be debug output
@@ -131,25 +184,23 @@ async function executeWithTimeout(
 		}
 
 		// Read stderr
-		if (process.stderr) {
-			process.stderr.on("data", (data) => {
+		if (childProcess.stderr) {
+			childProcess.stderr.on("data", (data) => {
 				error += data.toString();
 			});
 		}
 
 		// Handle process exit
-		process.on("exit", (code) => {
-			clearTimeout(timer);
-			if (timedOut) return; // Already resolved
-
+		childProcess.on("exit", (code) => {
+			if (timedOut) return;
 			if (code === 0) {
-				resolve({
+				done({
 					status: "success",
 					output: output || "Job completed successfully",
 					usage,
 				});
 			} else {
-				resolve({
+				done({
 					status: "failed",
 					error: error || `Process exited with code ${code}`,
 				});
@@ -157,21 +208,18 @@ async function executeWithTimeout(
 		});
 
 		// Handle spawn errors
-		process.on("error", (err) => {
-			clearTimeout(timer);
-			if (!timedOut) {
-				resolve({ status: "failed", error: `Failed to spawn process: ${err.message}` });
-			}
+		childProcess.on("error", (err) => {
+			done({ status: "failed", error: `Failed to spawn process: ${err.message}` });
 		});
 
-		// Send the prompt via stdin
-		if (process.stdin) {
+		// Send the prompt using pi RPC protocol format
+		if (childProcess.stdin) {
 			const message = JSON.stringify({
-				type: "message",
-				role: "user",
-				content: prompt,
+				type: "prompt",
+				id: "job-prompt",
+				message: prompt,
 			});
-			process.stdin.write(message + "\n");
+			childProcess.stdin.write(message + "\n");
 		}
 	});
 }

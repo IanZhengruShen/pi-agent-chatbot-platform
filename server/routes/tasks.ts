@@ -69,7 +69,7 @@ export function createTasksRouter(
 			[taskId, userId],
 		).then(async (result) => {
 			if (result.rows.length === 0) {
-				sendEvent("error", { error: "Task not found" });
+				sendEvent("task_error", { error: "Task not found" });
 				cleanup();
 				return;
 			}
@@ -90,7 +90,7 @@ export function createTasksRouter(
 						artifacts: artifacts.rows,
 					});
 				} else {
-					sendEvent("error", {
+					sendEvent("task_error", {
 						error: task.error,
 						status: task.status,
 					});
@@ -104,7 +104,7 @@ export function createTasksRouter(
 				sendEvent(event.type, event.data);
 
 				// Close on terminal events
-				if (event.type === "complete" || event.type === "error" || event.type === "cancelled") {
+				if (event.type === "complete" || event.type === "task_error" || event.type === "cancelled") {
 					cleanup();
 				}
 			});
@@ -118,10 +118,44 @@ export function createTasksRouter(
 			req.on("close", cleanup);
 		}).catch((err) => {
 			console.error("[tasks-sse] Error:", err);
-			sendEvent("error", { error: "Internal server error" });
+			sendEvent("task_error", { error: "Internal server error" });
 			cleanup();
 		});
 	});
+
+	// -----------------------------------------------------------------------
+	// GET /api/tasks/:id/artifacts/:artifactId — Download artifact
+	// Registered before requireAuth because browser downloads (target="_blank")
+	// can't set Authorization header; accepts ?token= query param instead.
+	// -----------------------------------------------------------------------
+	router.get("/:id/artifacts/:artifactId", requireAuthOrToken, asyncRoute(async (req: Request, res: Response) => {
+		// Verify task ownership
+		const task = await db.query<TaskRow>(
+			`SELECT id FROM tasks WHERE id = $1 AND user_id = $2`,
+			[req.params.id, req.user!.userId],
+		);
+		if (task.rows.length === 0) {
+			return res.status(404).json({ success: false, error: "Task not found" });
+		}
+
+		const artifact = await db.query<TaskArtifactRow>(
+			`SELECT * FROM task_artifacts WHERE id = $1 AND task_id = $2`,
+			[req.params.artifactId, req.params.id],
+		);
+		if (artifact.rows.length === 0) {
+			return res.status(404).json({ success: false, error: "Artifact not found" });
+		}
+
+		const a = artifact.rows[0];
+		const data = await storage.download(a.storage_key);
+
+		res.setHeader("Content-Type", a.content_type || "application/octet-stream");
+		res.setHeader("Content-Disposition", `attachment; filename="${a.filename}"`);
+		if (a.size_bytes) {
+			res.setHeader("Content-Length", a.size_bytes.toString());
+		}
+		res.send(data);
+	}));
 
 	// All remaining routes require standard auth
 	router.use(requireAuth);
@@ -278,38 +312,6 @@ export function createTasksRouter(
 		);
 
 		res.status(201).json({ success: true, data: { task: newTask.rows[0] } });
-	}));
-
-	// -----------------------------------------------------------------------
-	// GET /api/tasks/:id/artifacts/:artifactId — Download artifact
-	// -----------------------------------------------------------------------
-	router.get("/:id/artifacts/:artifactId", asyncRoute(async (req: Request, res: Response) => {
-		// Verify task ownership
-		const task = await db.query<TaskRow>(
-			`SELECT id FROM tasks WHERE id = $1 AND user_id = $2`,
-			[req.params.id, req.user!.userId],
-		);
-		if (task.rows.length === 0) {
-			return res.status(404).json({ success: false, error: "Task not found" });
-		}
-
-		const artifact = await db.query<TaskArtifactRow>(
-			`SELECT * FROM task_artifacts WHERE id = $1 AND task_id = $2`,
-			[req.params.artifactId, req.params.id],
-		);
-		if (artifact.rows.length === 0) {
-			return res.status(404).json({ success: false, error: "Artifact not found" });
-		}
-
-		const a = artifact.rows[0];
-		const data = await storage.download(a.storage_key);
-
-		res.setHeader("Content-Type", a.content_type || "application/octet-stream");
-		res.setHeader("Content-Disposition", `attachment; filename="${a.filename}"`);
-		if (a.size_bytes) {
-			res.setHeader("Content-Length", a.size_bytes.toString());
-		}
-		res.send(data);
 	}));
 
 	return router;
