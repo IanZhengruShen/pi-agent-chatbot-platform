@@ -1,0 +1,472 @@
+/**
+ * Full-width profile editor form for the Agent Studio.
+ * Extracted from AgentProfilesPanel with additions: live preview events, two-column layout.
+ */
+
+import { LitElement, html, css, nothing } from "lit";
+import { customElement, property, state } from "lit/decorators.js";
+import type { ProfileInfo, SkillInfo, ProfileFormData } from "./types.js";
+import { EMPTY_FORM } from "./types.js";
+
+@customElement("profile-editor")
+export class ProfileEditor extends LitElement {
+	static override styles = css`
+		:host {
+			display: block;
+		}
+		.editor {
+			display: flex;
+			flex-direction: column;
+			gap: 0.75rem;
+		}
+		.form-grid {
+			display: grid;
+			grid-template-columns: 1fr 1fr;
+			gap: 0.75rem;
+		}
+		.form-full {
+			grid-column: 1 / -1;
+		}
+		.form-field {
+			display: flex;
+			flex-direction: column;
+			gap: 0.25rem;
+		}
+		label {
+			font-size: 0.75rem;
+			font-weight: 500;
+			color: var(--muted-foreground, #6b7280);
+		}
+		input, select, textarea {
+			padding: 0.5rem;
+			border: 1px solid var(--border, #e5e7eb);
+			border-radius: 0.375rem;
+			font-size: 0.875rem;
+			background: var(--background, #fff);
+			color: var(--foreground, #111);
+			font-family: inherit;
+		}
+		input:focus, select:focus, textarea:focus {
+			outline: none;
+			border-color: var(--primary, #2563eb);
+			box-shadow: 0 0 0 2px color-mix(in srgb, var(--primary, #2563eb) 20%, transparent);
+		}
+		textarea {
+			resize: vertical;
+			min-height: 4rem;
+		}
+		textarea.system-prompt {
+			min-height: 10rem;
+			font-family: monospace;
+			font-size: 0.8rem;
+		}
+		.icon-field {
+			max-width: 80px;
+		}
+		.top-row {
+			display: flex;
+			gap: 0.75rem;
+			align-items: flex-end;
+		}
+		.top-row .form-field {
+			flex: 1;
+		}
+		.top-row .icon-field {
+			flex: 0 0 80px;
+		}
+		.skill-checkboxes {
+			display: flex;
+			flex-wrap: wrap;
+			gap: 0.5rem;
+			max-height: 10rem;
+			overflow-y: auto;
+			padding: 0.5rem;
+			border: 1px solid var(--border, #e5e7eb);
+			border-radius: 0.375rem;
+		}
+		.skill-checkbox {
+			display: flex;
+			align-items: center;
+			gap: 0.25rem;
+			font-size: 0.8rem;
+		}
+		.skill-checkbox input[type="checkbox"] {
+			margin: 0;
+			padding: 0;
+		}
+		.skill-scope {
+			font-size: 0.6rem;
+			color: var(--muted-foreground, #6b7280);
+		}
+		.form-actions {
+			display: flex;
+			gap: 0.5rem;
+			justify-content: flex-end;
+			padding-top: 0.5rem;
+			border-top: 1px solid var(--border, #e5e7eb);
+		}
+		button {
+			padding: 0.5rem 1rem;
+			border: none;
+			border-radius: 0.375rem;
+			font-size: 0.875rem;
+			cursor: pointer;
+			font-weight: 500;
+		}
+		.btn-primary {
+			background: var(--primary, #2563eb);
+			color: white;
+		}
+		.btn-primary:hover {
+			opacity: 0.9;
+		}
+		.btn-primary:disabled {
+			opacity: 0.5;
+			cursor: not-allowed;
+		}
+		.btn-secondary {
+			background: transparent;
+			color: var(--foreground, #111);
+			border: 1px solid var(--border, #e5e7eb);
+		}
+		.btn-secondary:hover {
+			background: var(--muted, #f3f4f6);
+		}
+		.status {
+			font-size: 0.875rem;
+			padding: 0.5rem;
+			border-radius: 0.375rem;
+		}
+		.status-success { background: #dcfce7; color: #166534; }
+		.status-error { background: #fef2f2; color: #991b1b; }
+	`;
+
+	@property({ type: Object })
+	profile: ProfileInfo | null = null;
+
+	@property({ type: Function })
+	getToken: (() => string | null) | undefined;
+
+	@property({ type: String })
+	userRole: string = "member";
+
+	@property({ type: Array })
+	availableSkills: SkillInfo[] = [];
+
+	@state() private form: ProfileFormData = { ...EMPTY_FORM };
+	@state() private saving = false;
+	@state() private statusMessage = "";
+	@state() private statusType: "success" | "error" = "success";
+
+	private _previewTimer: ReturnType<typeof setTimeout> | undefined;
+	private _dismissTimer: ReturnType<typeof setTimeout> | undefined;
+	private _keyHandler = (e: KeyboardEvent) => this._handleKeyDown(e);
+
+	override connectedCallback() {
+		super.connectedCallback();
+		window.addEventListener("keydown", this._keyHandler);
+		if (this.profile) {
+			this.form = {
+				name: this.profile.name,
+				description: this.profile.description || "",
+				icon: this.profile.icon || "",
+				scope: this.profile.scope,
+				system_prompt: this.profile.system_prompt,
+				prompt_mode: this.profile.prompt_mode,
+				skill_ids: this.profile.skill_ids || [],
+				model_id: this.profile.model_id || "",
+				provider: this.profile.provider || "",
+				starter_message: this.profile.starter_message || "",
+				suggested_prompts: this.profile.suggested_prompts || [],
+			};
+		}
+		this._emitPreview();
+	}
+
+	override disconnectedCallback() {
+		super.disconnectedCallback();
+		clearTimeout(this._previewTimer);
+		clearTimeout(this._dismissTimer);
+		window.removeEventListener("keydown", this._keyHandler);
+	}
+
+	private _handleKeyDown(e: KeyboardEvent) {
+		if (e.key === "Escape") {
+			this.dispatchEvent(new CustomEvent("cancel", { bubbles: true, composed: true }));
+		}
+		if ((e.metaKey || e.ctrlKey) && e.key === "s") {
+			e.preventDefault();
+			if (!this.saving && this.form.name && this.form.system_prompt) {
+				this._handleSave();
+			}
+		}
+	}
+
+	private _updateForm(partial: Partial<ProfileFormData>) {
+		this.form = { ...this.form, ...partial };
+		this._emitPreviewDebounced();
+	}
+
+	private _emitPreviewDebounced() {
+		clearTimeout(this._previewTimer);
+		this._previewTimer = setTimeout(() => this._emitPreview(), 150);
+	}
+
+	private _emitPreview() {
+		this.dispatchEvent(new CustomEvent("preview-change", {
+			detail: { form: { ...this.form } },
+			bubbles: true,
+			composed: true,
+		}));
+	}
+
+	private _toggleSkill(skillId: string) {
+		const ids = new Set(this.form.skill_ids);
+		if (ids.has(skillId)) ids.delete(skillId);
+		else ids.add(skillId);
+		this._updateForm({ skill_ids: [...ids] });
+	}
+
+	private _updateSuggestedPrompts(value: string) {
+		const prompts = value.split("\n").map(s => s.trim()).filter(Boolean);
+		this._updateForm({ suggested_prompts: prompts });
+	}
+
+	private async _fetchApi(url: string, options: RequestInit = {}): Promise<any> {
+		const token = this.getToken?.();
+		const res = await fetch(url, {
+			...options,
+			headers: {
+				"Content-Type": "application/json",
+				...(token ? { Authorization: `Bearer ${token}` } : {}),
+				...options.headers,
+			},
+		});
+		return res.json();
+	}
+
+	private async _handleSave() {
+		if (!this.form.name || !this.form.system_prompt) {
+			this.statusMessage = "Name and system prompt are required";
+			this.statusType = "error";
+			return;
+		}
+
+		this.saving = true;
+		this.statusMessage = "";
+
+		try {
+			const body = {
+				...this.form,
+				skill_ids: this.form.skill_ids.length > 0 ? this.form.skill_ids : null,
+				model_id: this.form.model_id || null,
+				provider: this.form.provider || null,
+				description: this.form.description || null,
+				icon: this.form.icon || null,
+				starter_message: this.form.starter_message || null,
+				suggested_prompts: this.form.suggested_prompts.length > 0 ? this.form.suggested_prompts : null,
+			};
+
+			let result;
+			if (this.profile) {
+				result = await this._fetchApi(`/api/agent-profiles/${this.profile.id}`, {
+					method: "PUT",
+					body: JSON.stringify(body),
+				});
+			} else {
+				result = await this._fetchApi("/api/agent-profiles", {
+					method: "POST",
+					body: JSON.stringify(body),
+				});
+			}
+
+			if (result.success) {
+				this.statusMessage = this.profile
+					? `Profile "${this.form.name}" updated.`
+					: `Profile "${this.form.name}" created.`;
+				this.statusType = "success";
+				clearTimeout(this._dismissTimer);
+				this._dismissTimer = setTimeout(() => { this.statusMessage = ""; }, 3000);
+				this.dispatchEvent(new CustomEvent("save", {
+					detail: { profile: result.data?.profile || result.data },
+					bubbles: true,
+					composed: true,
+				}));
+			} else {
+				this.statusMessage = result.error || "Save failed";
+				this.statusType = "error";
+			}
+		} catch {
+			this.statusMessage = "Network error";
+			this.statusType = "error";
+		} finally {
+			this.saving = false;
+		}
+	}
+
+	override render() {
+		const isAdmin = this.userRole === "admin";
+		const scopes = isAdmin
+			? [
+				{ value: "user", label: "Personal" },
+				{ value: "team", label: "Team" },
+				{ value: "platform", label: "Platform" },
+			]
+			: [{ value: "user", label: "Personal" }];
+
+		return html`
+			<div class="editor">
+				${this.statusMessage ? html`
+					<div class="status ${this.statusType === "success" ? "status-success" : "status-error"}">
+						${this.statusMessage}
+					</div>
+				` : nothing}
+
+				<!-- Row 1: Icon + Name + Scope -->
+				<div class="top-row">
+					<div class="form-field icon-field">
+						<label>Icon</label>
+						<input
+							type="text"
+							placeholder="e.g. emoji"
+							maxlength="4"
+							.value=${this.form.icon}
+							@input=${(e: Event) => this._updateForm({ icon: (e.target as HTMLInputElement).value })}
+						/>
+					</div>
+					<div class="form-field">
+						<label>Name *</label>
+						<input
+							type="text"
+							placeholder="e.g. Finance Agent"
+							maxlength="100"
+							.value=${this.form.name}
+							@input=${(e: Event) => this._updateForm({ name: (e.target as HTMLInputElement).value })}
+						/>
+					</div>
+					<div class="form-field" style="max-width: 140px;">
+						<label>Scope</label>
+						<select
+							.value=${this.form.scope}
+							@change=${(e: Event) => this._updateForm({ scope: (e.target as HTMLSelectElement).value })}
+							?disabled=${!!this.profile}
+						>
+							${scopes.map(s => html`<option value=${s.value}>${s.label}</option>`)}
+						</select>
+					</div>
+				</div>
+
+				<!-- Description -->
+				<div class="form-field">
+					<label>Description</label>
+					<input
+						type="text"
+						placeholder="Brief description of what this agent does"
+						.value=${this.form.description}
+						@input=${(e: Event) => this._updateForm({ description: (e.target as HTMLInputElement).value })}
+					/>
+				</div>
+
+				<!-- System Prompt -->
+				<div class="form-field">
+					<label>
+						System Prompt *
+						<select
+							style="display: inline; margin-left: 0.5rem; font-size: 0.7rem;"
+							.value=${this.form.prompt_mode}
+							@change=${(e: Event) => this._updateForm({ prompt_mode: (e.target as HTMLSelectElement).value })}
+						>
+							<option value="replace">Replace default prompt</option>
+							<option value="append">Append to default prompt</option>
+						</select>
+					</label>
+					<textarea
+						class="system-prompt"
+						placeholder="You are a specialized agent that..."
+						.value=${this.form.system_prompt}
+						@input=${(e: Event) => this._updateForm({ system_prompt: (e.target as HTMLTextAreaElement).value })}
+					></textarea>
+				</div>
+
+				<!-- Provider + Model -->
+				<div class="form-grid">
+					<div class="form-field">
+						<label>Provider (optional)</label>
+						<select
+							.value=${this.form.provider}
+							@change=${(e: Event) => this._updateForm({ provider: (e.target as HTMLSelectElement).value })}
+						>
+							<option value="">Default</option>
+							<option value="anthropic">Anthropic</option>
+							<option value="openai">OpenAI</option>
+							<option value="google">Google</option>
+						</select>
+					</div>
+					<div class="form-field">
+						<label>Model (optional)</label>
+						<input
+							type="text"
+							placeholder="e.g. claude-sonnet-4-20250514"
+							.value=${this.form.model_id}
+							@input=${(e: Event) => this._updateForm({ model_id: (e.target as HTMLInputElement).value })}
+						/>
+					</div>
+				</div>
+
+				<!-- Skills -->
+				${this.availableSkills.length > 0 ? html`
+					<div class="form-field">
+						<label>Skills (select which skills this agent can use)</label>
+						<div class="skill-checkboxes">
+							${this.availableSkills.map(skill => html`
+								<label class="skill-checkbox">
+									<input
+										type="checkbox"
+										.checked=${this.form.skill_ids.includes(skill.id)}
+										@change=${() => this._toggleSkill(skill.id)}
+									/>
+									<span>${skill.name}</span>
+									<span class="skill-scope">(${skill.scope})</span>
+								</label>
+							`)}
+						</div>
+					</div>
+				` : nothing}
+
+				<!-- Starter Message -->
+				<div class="form-field">
+					<label>Starter Message (optional — shown when chat starts)</label>
+					<textarea
+						placeholder="Hi! I'm the Finance Agent. I can help you with..."
+						.value=${this.form.starter_message}
+						@input=${(e: Event) => this._updateForm({ starter_message: (e.target as HTMLTextAreaElement).value })}
+					></textarea>
+				</div>
+
+				<!-- Suggested Prompts -->
+				<div class="form-field">
+					<label>Suggested Prompts (one per line, optional)</label>
+					<textarea
+						placeholder="Check Q4 revenue&#10;Run expense report&#10;Compare budgets"
+						.value=${this.form.suggested_prompts.join("\n")}
+						@input=${(e: Event) => this._updateSuggestedPrompts((e.target as HTMLTextAreaElement).value)}
+					></textarea>
+				</div>
+
+				<!-- Actions -->
+				<div class="form-actions">
+					<button class="btn-secondary" @click=${() => this.dispatchEvent(new CustomEvent("cancel", { bubbles: true, composed: true }))}>
+						Cancel
+					</button>
+					<button
+						class="btn-primary"
+						?disabled=${this.saving || !this.form.name || !this.form.system_prompt}
+						@click=${() => this._handleSave()}
+					>
+						${this.saving ? "Saving..." : (this.profile ? "Update" : "Create")}
+					</button>
+				</div>
+			</div>
+		`;
+	}
+}

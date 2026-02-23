@@ -53,6 +53,9 @@ import { AuthClient } from "./auth/auth-client.js";
 import "./auth/login-page.js";
 import { RemoteAgent } from "./remote-agent.js";
 import { ApiStorageBackend } from "./storage/api-storage-backend.js";
+import { resolveRoute, navigateTo } from "./router.js";
+import type { RouteName } from "./router.js";
+import "./studio/StudioPage.js";
 import "./app.css";
 
 // ============================================================================
@@ -92,6 +95,10 @@ let sidebarSessions: SessionMetadata[] = [];
 let toolsMenuOpen = false;
 let userMenuOpen = false;
 let profileMenuOpen = false;
+
+// Router state
+let currentRoute: RouteName = "chat";
+let routeParams: Record<string, string> = {};
 
 // Agent profiles state
 interface AgentProfileInfo {
@@ -698,8 +705,32 @@ const renderApp = () => {
 		return;
 	}
 
-	// Authenticated — show main app
+	// Authenticated — resolve route
+	const resolved = resolveRoute();
+	currentRoute = resolved.route;
+	routeParams = resolved.params;
+
 	const user = authClient.user;
+
+	// Studio routes — render full-page studio
+	if (currentRoute === "studio" || currentRoute === "studio-edit") {
+		const studioHtml = html`
+			<div class="w-full h-screen flex flex-col bg-background text-foreground overflow-hidden">
+				<studio-page
+					.getToken=${() => authClient.token}
+					.userRole=${user?.role || "member"}
+					.userId=${user?.userId || ""}
+					.editProfileId=${currentRoute === "studio-edit" ? routeParams.id : null}
+					.activeTab=${routeParams.tab || "profiles"}
+					@profiles-changed=${() => fetchAgentProfiles()}
+				></studio-page>
+			</div>
+		`;
+		render(studioHtml, app);
+		return;
+	}
+
+	// Chat route
 	const sessionGroups = groupSessionsByDate(sidebarSessions);
 
 	const appHtml = html`
@@ -790,8 +821,16 @@ const renderApp = () => {
 						<span class="text-sm font-medium text-foreground truncate">${currentTitle || "New chat"}</span>
 					</div>
 
-					<!-- Right: agent profile selector, tools dropdown, theme toggle, user menu -->
+					<!-- Right: studio link, agent profile selector, tools dropdown, theme toggle, user menu -->
 					<div class="flex items-center gap-1">
+						<!-- Studio link -->
+						<button
+							class="flex items-center gap-1.5 px-2 py-1 text-sm rounded-md hover:bg-muted transition-colors cursor-pointer border border-transparent hover:border-border text-muted-foreground hover:text-foreground"
+							@click=${() => navigateTo("/studio")}
+						>
+							${icon(Bot, "sm")}
+							<span>Studio</span>
+						</button>
 						<!-- Agent profile selector -->
 						<div class="relative" data-profile-menu>
 							<button
@@ -828,17 +867,31 @@ const renderApp = () => {
 									${agentProfiles.length > 0 ? html`
 										<div class="border-t border-border my-1"></div>
 										${agentProfiles.map(p => html`
-											<button
-												class="w-full flex items-center gap-2 px-3 py-2 text-sm hover:bg-muted transition-colors text-left cursor-pointer ${currentAgentProfileId === p.id ? "bg-muted/60 font-medium" : ""}"
-												@click=${() => selectAgentProfile(p.id)}
-											>
-												<span class="shrink-0">${p.icon || ""}${!p.icon ? icon(Bot, "sm") : nothing}</span>
-												<div class="flex-1 min-w-0">
-													<div class="truncate">${p.name}</div>
-													${p.description ? html`<div class="text-xs text-muted-foreground truncate">${p.description}</div>` : nothing}
-												</div>
-												<span class="text-xs text-muted-foreground shrink-0">${p.scope}</span>
-											</button>
+											<div class="flex items-center hover:bg-muted transition-colors ${currentAgentProfileId === p.id ? "bg-muted/60 font-medium" : ""}">
+												<button
+													class="flex-1 flex items-center gap-2 px-3 py-2 text-sm text-left cursor-pointer bg-transparent border-none font-[inherit]"
+													@click=${() => selectAgentProfile(p.id)}
+												>
+													<span class="shrink-0">${p.icon || ""}${!p.icon ? icon(Bot, "sm") : nothing}</span>
+													<div class="flex-1 min-w-0">
+														<div class="truncate">${p.name}</div>
+														${p.description ? html`<div class="text-xs text-muted-foreground truncate">${p.description}</div>` : nothing}
+													</div>
+													<span class="text-xs text-muted-foreground shrink-0">${p.scope}</span>
+												</button>
+												<button
+													class="shrink-0 p-1 mr-2 rounded hover:bg-primary/10 text-muted-foreground hover:text-primary cursor-pointer bg-transparent border-none"
+													title="Edit in Studio"
+													@click=${(e: Event) => {
+														e.stopPropagation();
+														profileMenuOpen = false;
+														navigateTo(`/studio/${p.id}/edit`);
+														renderApp();
+													}}
+												>
+													${icon(Settings, "sm")}
+												</button>
+											</div>
 										`)}
 									` : nothing}
 									<div class="border-t border-border my-1"></div>
@@ -846,21 +899,12 @@ const renderApp = () => {
 										class="w-full flex items-center gap-2 px-3 py-2 text-sm hover:bg-muted transition-colors text-left cursor-pointer"
 										@click=${() => {
 											profileMenuOpen = false;
-											openDialog({
-												title: "Agent Profiles",
-												tag: "agent-profiles-panel",
-												style: "max-width: 700px; width: 90vw; padding: 1.5rem; border: 1px solid var(--border); border-radius: 0.5rem; background: var(--background);",
-												setup: (panel) => {
-													panel.getToken = () => authClient.token;
-													panel.userRole = user?.role || "member";
-													panel.onProfilesChanged = () => fetchAgentProfiles();
-												},
-											});
+											navigateTo("/studio");
 											renderApp();
 										}}
 									>
 										${icon(Settings, "sm")}
-										<span>Manage Profiles...</span>
+										<span>Manage in Studio...</span>
 									</button>
 								</div>
 							` : nothing}
@@ -1058,6 +1102,10 @@ async function initApp() {
 	if (!app) throw new Error("App container not found");
 
 	setupClickOutside();
+
+	// Client-side routing
+	window.addEventListener("popstate", () => renderApp());
+	window.addEventListener("route-change", () => renderApp());
 
 	if (authClient.isAuthenticated) {
 		// Validate stored token
