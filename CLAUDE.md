@@ -39,7 +39,7 @@ npm run scheduler  # Start the scheduler worker (separate process)
 - `server/db/` — PostgreSQL connection pool (`server/db/index.ts`) and migration runner (`server/db/migrate.ts`)
 - `server/db/migrations/` — 6 SQL migrations: initial schema, provider keys, skills/files, skill bundles, OAuth credentials, scheduler
 - `server/auth/` — JWT auth middleware (`middleware.ts`), local auth with bcrypt (`local-auth.ts`), permissions (`permissions.ts`), WebSocket auth (`ws-auth.ts`)
-- `server/routes/` — REST API: `auth.ts`, `sessions.ts`, `settings.ts`, `provider-keys.ts`, `skills.ts`, `files.ts`, `jobs.ts`, `oauth.ts`, `import.ts`
+- `server/routes/` — REST API: `auth.ts`, `sessions.ts`, `settings.ts`, `provider-keys.ts`, `skills.ts`, `files.ts`, `jobs.ts`, `oauth.ts`, `import.ts`, `agent-profiles.ts`, `tasks.ts`
 - `server/services/crypto.ts` — Envelope encryption (AES-256-GCM) for provider API keys
 - `server/services/process-pool.ts` — Process lifecycle: idle timeout, max cap, crash handling
 - `server/services/storage.ts` — `StorageService` interface with `LocalFsStorageService` implementation
@@ -58,6 +58,7 @@ npm run scheduler  # Start the scheduler worker (separate process)
 - `src/storage/api-storage-backend.ts` — `StorageBackend` impl backed by REST API with optimistic local cache
 - `src/components/` — Platform UI panels: `SkillsPanel.ts`, `FilesPanel.ts`, `SchedulerPanel.ts`, `ProviderKeysPanel.ts`, `OAuthConnectionsPanel.ts`
 - `src/web-ui/` — Chat UI components (Lit.js): `ChatPanel.ts`, message rendering, tool renderers, artifact viewers, dialogs
+- `src/studio/` — Agent Studio: `StudioPage.ts` (main page), `ProfileEditor.ts` (form with auto-icon generation), `ProfilePreview.ts` (live preview)
 - `src/migration/export-indexeddb.ts` — One-time IndexedDB export script for migration from single-user system
 
 ## Architecture Notes
@@ -81,6 +82,14 @@ This project depends on published npm packages from the pi-mono monorepo:
 - `@mariozechner/pi-ai` — Unified LLM provider abstraction
 
 These are installed from npm (not `file:` links). Update versions when new releases are published.
+
+## Recent Features
+
+- **Agent Profiles** (`src/studio/`, `server/routes/agent-profiles.ts`) — CRUD for specialist agent profiles with custom system prompts, curated skills/files, model/provider overrides, starter messages, and suggested prompts. Scoped at platform/team/user level.
+- **Profile Preview** (`src/studio/ProfilePreview.ts`) — Real-time preview component that renders the agent profile card as it would appear in chat while editing.
+- **Profile File Injection** — Profiles can reference `file_ids` that get injected into the agent session on connect.
+- **Auto-generate Profile Icon** — `POST /api/agent-profiles/generate-icon` uses a lightweight LLM call to suggest an emoji. Tries the caller-specified provider/model first, then falls back across all configured providers (Anthropic → OpenAI → Google → Groq → xAI). ProfileEditor auto-triggers on name input (debounced 500ms) with a regenerate button; manual icon edits are preserved.
+- **Async Task Queue** (`server/services/task-queue.ts`) — Background task execution with SSE progress streaming and artifact collection.
 
 ## Architecture
 
