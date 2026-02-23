@@ -593,7 +593,6 @@ function selectAgentProfile(profileId: string | undefined): void {
 	currentAgentProfileId = profileId;
 	currentSessionId = undefined;
 	currentTitle = "";
-	welcomeDismissed = false;
 	chatPanel?.artifactsPanel?.clear();
 	fetchedFileRefs.clear();
 
@@ -726,28 +725,15 @@ const DEFAULT_STARTER_PROMPTS = [
 	"Explain a complex topic simply",
 ];
 
-let welcomeDismissed = false;
-
 function sendStarterPrompt(prompt: string) {
 	if (!remoteAgent || !chatPanel) return;
-	// Dismiss welcome screen immediately so user sees the chat panel
-	welcomeDismissed = true;
-	// Send the prompt as a user message
 	const agentIface = chatPanel.agentInterface;
 	if (agentIface && typeof agentIface.sendMessage === "function") {
 		agentIface.sendMessage(prompt);
 	}
-	renderApp();
 }
 
-function renderChatOrWelcome() {
-	// If we have messages, a session, or the user already interacted — show chat
-	const messages = remoteAgent?.state?.messages || [];
-	if (welcomeDismissed || messages.length > 0 || currentSessionId) {
-		return chatPanel;
-	}
-
-	// Check if a profile is selected and has its own prompts
+function buildWelcomeContent() {
 	const currentProfile = agentProfiles.find(p => p.id === currentAgentProfileId);
 	const profilePrompts = currentProfile?.suggested_prompts;
 	const starterPrompts = profilePrompts && profilePrompts.length > 0 ? profilePrompts : DEFAULT_STARTER_PROMPTS;
@@ -757,9 +743,11 @@ function renderChatOrWelcome() {
 	const profileDescription = currentProfile?.description || "Ask me anything or try one of the suggestions below.";
 
 	return html`
-		<div class="flex-1 flex flex-col items-center justify-center px-4 pb-16">
-			<!-- Welcome card -->
-			<div class="flex flex-col items-center gap-4 max-w-lg w-full text-center">
+		<div class="flex-1 flex flex-col items-center px-4">
+			<!-- Top spacer: pushes content to ~60% down the viewport -->
+			<div style="flex: 3"></div>
+
+			<div class="flex flex-col items-center gap-3 max-w-lg w-full text-center">
 				${profileIcon ? html`<span class="text-4xl">${profileIcon}</span>` : html`
 					<div class="w-12 h-12 rounded-full bg-primary/10 flex items-center justify-center">
 						${icon(Bot, "md")}
@@ -770,8 +758,7 @@ function renderChatOrWelcome() {
 					<p class="text-sm text-muted-foreground">${profileDescription}</p>
 				</div>
 
-				<!-- Starter prompts grid -->
-				<div class="grid grid-cols-2 gap-2 w-full mt-2">
+				<div class="grid grid-cols-2 gap-2 w-full mt-1">
 					${starterPrompts.slice(0, 6).map(prompt => html`
 						<button
 							class="text-left px-3 py-2.5 rounded-lg border border-border bg-background hover:bg-muted transition-colors cursor-pointer text-sm text-foreground"
@@ -783,15 +770,26 @@ function renderChatOrWelcome() {
 				</div>
 
 				${!currentAgentProfileId && agentProfiles.length > 0 ? html`
-					<p class="text-xs text-muted-foreground mt-2">
+					<p class="text-xs text-muted-foreground mt-1">
 						Switch to a specialist AI using the profile selector above
 					</p>
 				` : nothing}
 			</div>
+
+			<!-- Bottom spacer: smaller than top to keep content above center -->
+			<div style="flex: 2"></div>
 		</div>
-		<!-- Still render the chat panel (hidden behind welcome) so it's ready -->
-		<div style="display:none">${chatPanel}</div>
 	`;
+}
+
+function updateWelcomeContent() {
+	if (!chatPanel) return;
+	const messages = remoteAgent?.state?.messages || [];
+	if (messages.length > 0 || currentSessionId) {
+		chatPanel.welcomeContent = undefined;
+	} else {
+		chatPanel.welcomeContent = buildWelcomeContent();
+	}
 }
 
 // ============================================================================
@@ -801,6 +799,9 @@ function renderChatOrWelcome() {
 const renderApp = () => {
 	const app = document.getElementById("app");
 	if (!app) return;
+
+	// Update welcome content on the chat panel before rendering
+	updateWelcomeContent();
 
 	// Not authenticated — show login page
 	if (!authClient.isAuthenticated) {
@@ -864,7 +865,6 @@ const renderApp = () => {
 								if (remoteAgent) {
 									currentSessionId = undefined;
 									currentTitle = "";
-									welcomeDismissed = false;
 									chatPanel?.artifactsPanel?.clear();
 									fetchedFileRefs.clear();
 									await remoteAgent.newSession();
@@ -1183,7 +1183,7 @@ const renderApp = () => {
 								<span class="text-muted-foreground text-sm">Setting up your AI assistant...</span>
 							</div>
 						</div>`
-						: renderChatOrWelcome()
+						: chatPanel
 				}
 			</div>
 		</div>

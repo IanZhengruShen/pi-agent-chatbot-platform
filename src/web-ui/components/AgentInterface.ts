@@ -1,5 +1,5 @@
 import { streamSimple, type ToolResultMessage, type Usage } from "@mariozechner/pi-ai";
-import { html, LitElement } from "lit";
+import { html, LitElement, type TemplateResult } from "lit";
 import { customElement, property, query, state } from "lit/decorators.js";
 import { ModelSelector } from "../dialogs/ModelSelector.js";
 import type { MessageEditor, SkillInfo } from "./MessageEditor.js";
@@ -34,6 +34,8 @@ export class AgentInterface extends LitElement {
 	@property({ attribute: false }) onCostClick?: () => void;
 	// Skills available for slash command autocomplete
 	@property({ attribute: false }) skills: SkillInfo[] = [];
+	// Optional welcome content shown in the messages area when there are no messages
+	@property({ attribute: false }) welcomeContent?: TemplateResult;
 
 	@state() private _showDetails = false;
 
@@ -352,11 +354,16 @@ export class AgentInterface extends LitElement {
 
 		const session = this.session;
 		const state = this.session.state;
+		const hasMessages = state.messages.length > 0 || state.isStreaming;
+
 		return html`
 			<div class="flex flex-col h-full bg-background text-foreground">
 				<!-- Messages Area -->
-				<div class="flex-1 overflow-y-auto">
-					<div class="max-w-3xl mx-auto p-4 pb-0">${this.renderMessages()}</div>
+				<div class="flex-1 overflow-y-auto ${!hasMessages && this.welcomeContent ? "flex flex-col" : ""}">
+					${!hasMessages && this.welcomeContent
+						? this.welcomeContent
+						: html`<div class="max-w-3xl mx-auto p-4 pb-0">${this.renderMessages()}</div>`
+					}
 				</div>
 
 				<!-- Input Area -->

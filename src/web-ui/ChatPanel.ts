@@ -1,5 +1,5 @@
 import { Badge } from "@mariozechner/mini-lit/dist/Badge.js";
-import { html, LitElement } from "lit";
+import { html, LitElement, type TemplateResult } from "lit";
 import { customElement, state } from "lit/decorators.js";
 import "./components/AgentInterface.js";
 import type { Agent, AgentTool } from "@mariozechner/pi-agent-core";
@@ -24,6 +24,7 @@ export class ChatPanel extends LitElement {
 	@state() private showArtifactsPanel = false;
 	@state() private windowWidth = 0;
 	private _skills: Array<{ name: string; description: string }> = [];
+	private _welcomeContent?: TemplateResult;
 
 	get skills() {
 		return this._skills;
@@ -34,6 +35,18 @@ export class ChatPanel extends LitElement {
 		if (this.agentInterface) {
 			this.agentInterface.skills = value;
 		}
+	}
+
+	get welcomeContent() {
+		return this._welcomeContent;
+	}
+
+	set welcomeContent(value: TemplateResult | undefined) {
+		this._welcomeContent = value;
+		if (this.agentInterface) {
+			this.agentInterface.welcomeContent = value;
+		}
+		this.requestUpdate();
 	}
 
 	private resizeHandler = () => {
@@ -93,6 +106,7 @@ export class ChatPanel extends LitElement {
 		this.agentInterface.onBeforeSend = config?.onBeforeSend;
 		this.agentInterface.onCostClick = config?.onCostClick;
 		this.agentInterface.skills = this._skills;
+		this.agentInterface.welcomeContent = this._welcomeContent;
 
 		// Set up artifacts panel
 		this.artifactsPanel = new ArtifactsPanel();
