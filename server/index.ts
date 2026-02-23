@@ -82,7 +82,7 @@ async function main() {
 	app.use("/api/oauth", apiRateLimit, createOAuthRouter(crypto));
 	app.use("/api/jobs", apiRateLimit, createJobsRouter(storageService, crypto));
 	app.use("/api/tasks", apiRateLimit, createTasksRouter(storageService, crypto, taskQueueService));
-	app.use("/api/agent-profiles", apiRateLimit, createAgentProfilesRouter());
+	app.use("/api/agent-profiles", apiRateLimit, createAgentProfilesRouter(agentExecutor));
 
 	// Read files from the agent's working directory (for rendering artifacts)
 	app.get("/api/agent-files", requireAuth, apiRateLimit, async (req, res) => {

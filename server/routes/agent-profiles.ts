@@ -6,14 +6,98 @@
  */
 
 import { Router } from "express";
+import { type Context, complete, getModel } from "@mariozechner/pi-ai";
 import { getDatabase } from "../db/index.js";
 import type { AgentProfileRow } from "../db/types.js";
 import { requireAuth } from "../auth/middleware.js";
 import { asyncRoute } from "../utils/async-handler.js";
+import type { AgentExecutor } from "../services/agent-executor.js";
 
-export function createAgentProfilesRouter(): Router {
+const DEFAULT_ICON = "\u{1F916}"; // 🤖
+
+/** Cheap/fast models to try for icon generation, in preference order. */
+const ICON_GEN_CANDIDATES: { provider: string; envVar: string; modelId: string }[] = [
+	{ provider: "anthropic", envVar: "ANTHROPIC_API_KEY", modelId: "claude-3-5-haiku-20241022" },
+	{ provider: "openai", envVar: "OPENAI_API_KEY", modelId: "gpt-4o-mini" },
+	{ provider: "google", envVar: "GEMINI_API_KEY", modelId: "gemini-2.5-flash" },
+	{ provider: "groq", envVar: "GROQ_API_KEY", modelId: "openai/gpt-oss-20b" },
+	{ provider: "xai", envVar: "XAI_API_KEY", modelId: "grok-4-fast-non-reasoning" },
+];
+
+export function createAgentProfilesRouter(agentExecutor: AgentExecutor): Router {
 	const router = Router();
 	router.use(requireAuth);
+
+	// -----------------------------------------------------------------------
+	// POST /generate-icon — Auto-generate an emoji icon via LLM
+	// -----------------------------------------------------------------------
+	router.post("/generate-icon", asyncRoute(async (req, res) => {
+		const { name, description, provider: reqProvider, model: reqModel } = req.body;
+		if (!name || typeof name !== "string") {
+			res.status(400).json({ success: false, error: "name is required" });
+			return;
+		}
+
+		try {
+			const env = await agentExecutor.buildEnv(req.user!.userId, req.user!.teamId);
+
+			let apiKey: string | undefined;
+			let model: ReturnType<typeof getModel> | undefined;
+
+			// If caller specified a provider+model, try that first
+			if (reqProvider && reqModel) {
+				const envVar = ICON_GEN_CANDIDATES.find(c => c.provider === reqProvider)?.envVar
+					?? `${(reqProvider as string).toUpperCase().replace(/-/g, "_")}_API_KEY`;
+				const key = env[envVar];
+				if (key) {
+					const m = getModel(reqProvider as any, reqModel);
+					if (m) {
+						apiKey = key;
+						model = m;
+					}
+				}
+			}
+
+			// Fall back to first available provider from candidate list
+			if (!apiKey || !model) {
+				for (const candidate of ICON_GEN_CANDIDATES) {
+					const key = env[candidate.envVar];
+					if (!key) continue;
+					const m = getModel(candidate.provider as any, candidate.modelId);
+					if (!m) continue;
+					apiKey = key;
+					model = m;
+					break;
+				}
+			}
+
+			if (!apiKey || !model) {
+				res.json({ success: true, data: { icon: DEFAULT_ICON } });
+				return;
+			}
+
+			const descPart = description ? ` described as '${description}'` : "";
+			const context: Context = {
+				messages: [{
+					role: "user",
+					content: `Pick one emoji that best represents an AI agent named '${name}'${descPart}. Reply with ONLY the single emoji character, nothing else.`,
+					timestamp: Date.now(),
+				}],
+			};
+
+			const result = await complete(model, context, {
+				apiKey,
+				maxTokens: 10,
+			} as any);
+
+			const textPart = result.content?.find((c: any) => c.type === "text");
+			const icon = (textPart && "text" in textPart ? textPart.text.trim() : "") || DEFAULT_ICON;
+			res.json({ success: true, data: { icon } });
+		} catch (err) {
+			console.error("[agent-profiles] Failed to generate icon:", err);
+			res.json({ success: true, data: { icon: DEFAULT_ICON } });
+		}
+	}));
 
 	// -----------------------------------------------------------------------
 	// GET / — List visible profiles (platform + user's team + user's own)
