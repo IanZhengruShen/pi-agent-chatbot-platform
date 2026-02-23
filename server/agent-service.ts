@@ -22,6 +22,8 @@ import type { ProcessPool } from "./services/process-pool.js";
 import type { StorageService } from "./services/storage.js";
 import { resolveSkillsForUser, type ResolvedSkills } from "./services/skill-resolver.js";
 import { resolveFilesForUser, type ResolvedFiles } from "./services/file-resolver.js";
+import { resolveMemoryForUser, type ResolvedMemory } from "./services/memory-resolver.js";
+import { issueMemoryToken, revokeMemoryToken } from "./auth/memory-tokens.js";
 import { AgentExecutor } from "./services/agent-executor.js";
 import type { Database } from "./db/types.js";
 import { WsBridge, type BridgeOptions } from "./ws-bridge.js";
@@ -57,6 +59,8 @@ export class TenantBridge extends WsBridge {
 	private storage: StorageService;
 	private resolvedSkills: ResolvedSkills | null = null;
 	private resolvedFiles: ResolvedFiles | null = null;
+	private resolvedMemory: ResolvedMemory | null = null;
+	private memoryToken: string | null = null;
 	private tempSystemPromptFile: string | null = null;
 	private pendingMessages: string[] = [];
 	private ready = false;
@@ -139,9 +143,19 @@ export class TenantBridge extends WsBridge {
 					})()
 					: Promise.resolve()
 			),
+
+			// 5. Resolve user memories for injection
+			resolveMemoryForUser(this.db, this.user.userId)
+				.then(memory => { this.resolvedMemory = memory; })
+				.catch(err => {
+					console.error("[tenant-bridge] Failed to resolve memories:", err);
+				}),
 		]);
 
 		Object.assign(this.extraEnv, envKeys);
+
+		// Issue memory token for the extension to authenticate internal API calls
+		this.memoryToken = issueMemoryToken(this.user.userId, this.user.teamId);
 
 		// Audit log: record key decryption for each provider (non-blocking)
 		for (const key of Object.keys(envKeys)) {
@@ -231,17 +245,35 @@ export class TenantBridge extends WsBridge {
 			}
 		}
 
+		// Inject user memory file
+		if (this.resolvedMemory?.filePath) {
+			args.push("--file", this.resolvedMemory.filePath);
+		}
+
 		// Inject platform-wide extensions
 		if (process.env.BRAVE_SEARCH_API_KEY) {
 			const braveSearchExt = fileURLToPath(new URL("./extensions/brave-search.ts", import.meta.url));
 			args.push("--extension", braveSearchExt);
 		}
 
+		// Inject agent memory extension
+		if (this.memoryToken) {
+			const memoryExt = fileURLToPath(new URL("./extensions/agent-memory.ts", import.meta.url));
+			args.push("--extension", memoryExt);
+		}
+
 		console.log(`[tenant-bridge] Spawning: ${command} ${args.join(" ")}`);
 
 		return spawn(command, args, {
 			cwd: this.options.cwd || process.cwd(),
-			env: { ...process.env, ...this.extraEnv },
+			env: {
+				...process.env,
+				...this.extraEnv,
+				...(this.memoryToken ? {
+					CHATBOT_MEMORY_TOKEN: this.memoryToken,
+					CHATBOT_SERVER_PORT: String(process.env.PORT || "3001"),
+				} : {}),
+			},
 			stdio: ["pipe", "pipe", "pipe"],
 		});
 	}
@@ -372,6 +404,12 @@ export class TenantBridge extends WsBridge {
 		// Clean up file temp directories
 		this.resolvedFiles?.cleanup();
 		this.resolvedFiles = null;
+
+		// Clean up memory temp file and revoke token
+		this.resolvedMemory?.cleanup();
+		this.resolvedMemory = null;
+		revokeMemoryToken(this.memoryToken);
+		this.memoryToken = null;
 
 		// Clean up system prompt temp file
 		if (this.tempSystemPromptFile) {

@@ -30,9 +30,11 @@ import "./components/OAuthConnectionsPanel.js";
 import "./components/SchedulerPanel.js";
 import "./components/TasksDashboard.js";
 import "./components/AgentProfilesPanel.js";
+import "./components/MemoryPanel.js";
 import { html, render, nothing } from "lit";
 import {
 	Bot,
+	Brain,
 	Calendar,
 	ChevronDown,
 	FileUp,
@@ -1053,6 +1055,18 @@ const renderApp = () => {
 									}}>
 										${icon(FileUp, "sm")}
 										<span>Files</span>
+									</button>
+									<button class="w-full flex items-center gap-2 px-3 py-2 text-sm hover:bg-muted transition-colors text-left cursor-pointer" @click=${() => {
+										toolsMenuOpen = false;
+										openDialog({
+											title: "Memory",
+											tag: "memory-panel",
+											setup: (panel) => { panel.getToken = () => authClient.token; },
+										});
+										renderApp();
+									}}>
+										${icon(Brain, "sm")}
+										<span>Memory</span>
 									</button>
 									<button class="w-full flex items-center gap-2 px-3 py-2 text-sm hover:bg-muted transition-colors text-left cursor-pointer" @click=${() => {
 										toolsMenuOpen = false;

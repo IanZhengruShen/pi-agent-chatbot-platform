@@ -166,6 +166,17 @@ export interface TaskArtifactRow {
 	created_at: Date;
 }
 
+export interface AgentMemoryRow {
+	id: string;
+	user_id: string;
+	content: string;
+	category: "preference" | "fact" | "instruction" | "general";
+	source: "manual" | "agent";
+	pinned: boolean;
+	created_at: Date;
+	updated_at: Date;
+}
+
 export interface AgentProfileRow {
 	id: string;
 	scope: "platform" | "team" | "user";

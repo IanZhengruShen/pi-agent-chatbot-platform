@@ -31,6 +31,7 @@ import { createOAuthRouter } from "./routes/oauth.js";
 import { createJobsRouter } from "./routes/jobs.js";
 import { createTasksRouter } from "./routes/tasks.js";
 import { createAgentProfilesRouter } from "./routes/agent-profiles.js";
+import { createMemoryRouter } from "./routes/memory.js";
 import { requireAuth } from "./auth/middleware.js";
 import { createCryptoService } from "./services/crypto.js";
 import { ProcessPool } from "./services/process-pool.js";
@@ -150,6 +151,7 @@ async function main() {
 	app.use("/api/jobs", apiRateLimit, createJobsRouter(storageService, crypto));
 	app.use("/api/tasks", apiRateLimit, createTasksRouter(storageService, crypto, taskQueueService));
 	app.use("/api/agent-profiles", apiRateLimit, createAgentProfilesRouter(agentExecutor));
+	app.use("/api/memory", apiRateLimit, createMemoryRouter());
 
 	// Read files from the agent's working directory (for rendering artifacts)
 	app.get("/api/agent-files", requireAuth, apiRateLimit, async (req, res) => {
