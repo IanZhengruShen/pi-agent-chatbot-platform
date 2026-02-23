@@ -99,6 +99,16 @@ These are installed from npm (not `file:` links). Update versions when new relea
 - **Auto-generate Profile Icon** — `POST /api/agent-profiles/generate-icon` uses a lightweight LLM call to suggest an emoji. Tries the caller-specified provider/model first, then falls back across all configured providers (Anthropic → OpenAI → Google → Groq → xAI). ProfileEditor auto-triggers on name input (debounced 500ms) with a regenerate button; manual icon edits are preserved.
 - **Async Task Queue** (`server/services/task-queue.ts`) — Background task execution with SSE progress streaming and artifact collection.
 
+## Development Notes
+
+- **Type-check command**: `npx tsc --noEmit` (not tsgo — tsgo is not available via npx).
+- **Pre-existing type errors**: `server/routes/oauth.ts`, `server/services/oauth-service.ts`, `src/remote-agent.ts`, `server/middleware/rate-limit.ts` line 7 all have pre-existing type errors. Do not attempt to fix these.
+- **UI terminology**: Use "Agent Builder" (not "Studio"), "Agent Tools" (not "Skills"), "Your AI Subscriptions" (not "OAuth Subscriptions") in all user-facing strings.
+- **WebSocket profile switching order**: Must save session BEFORE clearing state, then disconnect (with listener removal to prevent stale close handler race), then clear state, then connect new. See `selectAgentProfile()` in `src/main.ts`.
+- **TenantBridge startup**: The 4 async prep steps (buildEnv, resolveSkills, resolveFiles, writeSystemPrompt) must remain parallelized via `Promise.all` in `server/agent-service.ts`. Do not make them sequential — it causes noticeable delay on profile switch.
+- **Welcome screen dismissal**: The `welcomeDismissed` flag in `src/main.ts` must be set to `true` before calling `renderApp()` when sending a starter prompt, and reset to `false` on profile switch and new chat. Without this, the chat panel stays hidden in `display:none` while the server processes the message.
+- **npm dependencies**: `helmet` and `cors` (+ `@types/cors`) are installed for security middleware.
+
 ## Architecture
 
 See `ARCHITECTURE.md` for the full multi-tenant platform design including database schema, deployment architecture, and implementation phases.
