@@ -6,6 +6,46 @@ import type { AuthResponse, JwtPayload } from "./types.js";
 const SALT_ROUNDS = 12;
 const TOKEN_EXPIRY = "7d";
 
+// Account lockout: 5 failed attempts → 15 minute lockout
+const MAX_FAILED_ATTEMPTS = 5;
+const LOCKOUT_DURATION_MS = 15 * 60 * 1000;
+const failedAttempts = new Map<string, { count: number; lockedUntil: number }>();
+
+export class LockoutError extends Error {
+	constructor(message: string) {
+		super(message);
+		this.name = "LockoutError";
+	}
+}
+
+function checkAndRecordFailure(email: string): void {
+	const key = email.toLowerCase();
+	const entry = failedAttempts.get(key) || { count: 0, lockedUntil: 0 };
+	entry.count++;
+	if (entry.count >= MAX_FAILED_ATTEMPTS) {
+		entry.lockedUntil = Date.now() + LOCKOUT_DURATION_MS;
+	}
+	failedAttempts.set(key, entry);
+}
+
+function checkLockout(email: string): void {
+	const key = email.toLowerCase();
+	const entry = failedAttempts.get(key);
+	if (!entry) return;
+	if (entry.lockedUntil > Date.now()) {
+		const minutesLeft = Math.ceil((entry.lockedUntil - Date.now()) / 60_000);
+		throw new LockoutError(`Account temporarily locked. Try again in ${minutesLeft} minute(s).`);
+	}
+	// Lockout expired — clear it
+	if (entry.lockedUntil > 0 && entry.lockedUntil <= Date.now()) {
+		failedAttempts.delete(key);
+	}
+}
+
+function clearFailures(email: string): void {
+	failedAttempts.delete(email.toLowerCase());
+}
+
 /** Custom error for 400 validation failures. */
 export class ValidationError extends Error {
 	constructor(message: string) {
@@ -138,6 +178,9 @@ export async function loginUser(
 	email: string,
 	password: string,
 ): Promise<AuthResponse> {
+	// Check lockout before doing any work
+	checkLockout(email);
+
 	const { rows } = await db.query(
 		`SELECT u.id, u.email, u.password_hash, u.display_name, u.role, u.team_id, t.name as team_name
 		 FROM users u
@@ -147,6 +190,7 @@ export async function loginUser(
 	);
 
 	if (rows.length === 0) {
+		checkAndRecordFailure(email);
 		throw new AuthError("Invalid email or password");
 	}
 
@@ -158,8 +202,12 @@ export async function loginUser(
 
 	const valid = await bcrypt.compare(password, user.password_hash);
 	if (!valid) {
+		checkAndRecordFailure(email);
 		throw new AuthError("Invalid email or password");
 	}
+
+	// Successful login — clear any failed attempts
+	clearFailures(email);
 
 	// Update last_login
 	await db.query("UPDATE users SET last_login = now() WHERE id = $1", [

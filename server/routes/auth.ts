@@ -6,6 +6,7 @@ import {
 	ConflictError,
 	AuthError,
 	ValidationError,
+	LockoutError,
 } from "../auth/local-auth.js";
 import { requireAuth } from "../auth/middleware.js";
 import { createSseTicket } from "../auth/sse-tickets.js";
@@ -54,6 +55,10 @@ router.post("/login", async (req, res) => {
 		const data = await loginUser(db, email, password);
 		res.json({ success: true, data });
 	} catch (err) {
+		if (err instanceof LockoutError) {
+			res.status(429).json({ success: false, error: err.message });
+			return;
+		}
 		if (err instanceof AuthError) {
 			res.status(401).json({ success: false, error: err.message });
 			return;
