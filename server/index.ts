@@ -200,6 +200,22 @@ async function main() {
 			}
 		}
 		try {
+			// PPTX: convert to slide images server-side via LibreOffice
+			if (ext === "pptx" || ext === "ppt") {
+				try {
+					const { convertPptxToSlideImages } = await import("./services/pptx-converter.js");
+					const slides = await convertPptxToSlideImages(filePath);
+					res.json({ slides, encoding: "slides" });
+					return;
+				} catch (convErr: any) {
+					// LibreOffice/pdftoppm not installed — fall back to raw base64
+					console.warn("[agent-files] PPTX conversion failed, serving raw binary:", convErr.message);
+					const buffer = await fs.readFile(filePath);
+					res.json({ content: buffer.toString("base64"), encoding: "base64" });
+					return;
+				}
+			}
+
 			const isBinary = BINARY_EXTENSIONS.has(ext);
 			if (isBinary) {
 				const buffer = await fs.readFile(filePath);
@@ -209,7 +225,8 @@ async function main() {
 				const content = await fs.readFile(filePath, "utf-8");
 				res.json({ content, encoding: "text" });
 			}
-		} catch {
+		} catch (err: any) {
+			console.error("[agent-files] Error serving file:", err.message);
 			res.status(404).json({ error: "File not found" });
 		}
 	});

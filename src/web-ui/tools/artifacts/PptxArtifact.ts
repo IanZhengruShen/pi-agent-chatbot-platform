@@ -19,12 +19,24 @@ const IMAGE_MIME: Record<string, string> = {
 	bmp: "image/bmp",
 };
 
+/**
+ * PPTX slide viewer.
+ *
+ * Prefers server-rendered PNG slide images (JSON array of base64 strings)
+ * produced by LibreOffice. Falls back to client-side JSZip parsing when
+ * the server returns raw base64 PPTX content (e.g. LibreOffice not installed).
+ */
 @customElement("pptx-artifact")
 export class PptxArtifact extends ArtifactElement {
 	@property({ type: String }) private _content = "";
 	@state() private error: string | null = null;
+	/** Server-rendered slide images (preferred path) */
+	@state() private slideImages: string[] = [];
+	/** Client-parsed slide data (JSZip fallback) */
 	@state() private slides: SlideData[] = [];
 	@state() private currentSlide = 0;
+	/** Which rendering mode is active */
+	@state() private mode: "images" | "parsed" | null = null;
 
 	get content(): string {
 		return this._content;
@@ -34,7 +46,10 @@ export class PptxArtifact extends ArtifactElement {
 		this._content = value;
 		this.error = null;
 		this.currentSlide = 0;
-		this.parsePptx();
+		this.slideImages = [];
+		this.slides = [];
+		this.mode = null;
+		this.parseContent();
 	}
 
 	protected override createRenderRoot(): HTMLElement | DocumentFragment {
@@ -68,7 +83,7 @@ export class PptxArtifact extends ArtifactElement {
 		return html`
 			<div class="flex items-center gap-1">
 				${DownloadButton({
-					content: this.decodeBase64(),
+					content: this.mode === "parsed" ? this.decodeBase64() : this._content,
 					filename: this.filename,
 					mimeType: "application/vnd.openxmlformats-officedocument.presentationml.presentation",
 					title: i18n("Download"),
@@ -77,13 +92,29 @@ export class PptxArtifact extends ArtifactElement {
 		`;
 	}
 
-	private async parsePptx() {
+	private async parseContent() {
 		if (!this._content) return;
 
+		// Try JSON first (server-rendered slide images)
+		try {
+			const slides = JSON.parse(this._content);
+			if (Array.isArray(slides) && slides.length > 0) {
+				this.slideImages = slides.map((b64: string) => `data:image/png;base64,${b64}`);
+				this.mode = "images";
+				return;
+			}
+		} catch {
+			// Not JSON — fall through to JSZip parsing
+		}
+
+		// Fallback: parse raw PPTX with JSZip
+		await this.parsePptxFallback();
+	}
+
+	private async parsePptxFallback() {
 		try {
 			const zip = await JSZip.loadAsync(this.decodeBase64());
 
-			// Find and sort slide XML files by slide number
 			const slideFiles: string[] = [];
 			zip.forEach((p) => {
 				if (/^ppt\/slides\/slide\d+\.xml$/.test(p)) slideFiles.push(p);
@@ -97,8 +128,6 @@ export class PptxArtifact extends ArtifactElement {
 				const slideXml = await zip.file(slideFile)?.async("text");
 				if (!slideXml) continue;
 
-				// Extract text grouped by paragraph (<a:p> blocks)
-				// Split XML by paragraph end tags, then extract text runs from each
 				const texts: string[] = [];
 				for (const paragraph of slideXml.split("</a:p>")) {
 					const runs = [...paragraph.matchAll(/<a:t[^>]*>([\s\S]*?)<\/a:t>/g)];
@@ -106,7 +135,6 @@ export class PptxArtifact extends ArtifactElement {
 					if (text) texts.push(text);
 				}
 
-				// Load embedded images from slide relationships
 				const imageBlobs: string[] = [];
 				const slideNum = slideFile.match(/slide(\d+)/)?.[1];
 				const relsXml = await zip.file(`ppt/slides/_rels/slide${slideNum}.xml.rels`)?.async("text");
@@ -129,6 +157,7 @@ export class PptxArtifact extends ArtifactElement {
 			}
 
 			this.slides = parsedSlides;
+			this.mode = "parsed";
 			if (this.slides.length === 0) {
 				this.error = "No slides found in the presentation";
 			}
@@ -138,8 +167,12 @@ export class PptxArtifact extends ArtifactElement {
 		}
 	}
 
+	private get totalSlides(): number {
+		return this.mode === "images" ? this.slideImages.length : this.slides.length;
+	}
+
 	private goToSlide(index: number) {
-		if (index >= 0 && index < this.slides.length) {
+		if (index >= 0 && index < this.totalSlides) {
 			this.currentSlide = index;
 		}
 	}
@@ -156,7 +189,7 @@ export class PptxArtifact extends ArtifactElement {
 			`;
 		}
 
-		if (this.slides.length === 0) {
+		if (this.totalSlides === 0) {
 			return html`
 				<div class="h-full flex items-center justify-center bg-background">
 					<div class="text-muted-foreground text-sm">Loading presentation...</div>
@@ -164,44 +197,15 @@ export class PptxArtifact extends ArtifactElement {
 			`;
 		}
 
-		const slide = this.slides[this.currentSlide];
-
 		return html`
 			<div class="h-full flex flex-col bg-background overflow-hidden">
 				<!-- Slide content -->
 				<div class="flex-1 overflow-auto flex items-center justify-center p-4">
-					<div
-						class="w-full bg-white text-black rounded-lg shadow-lg overflow-hidden"
-						style="max-width: 960px; aspect-ratio: 16/9;"
-					>
-						<div class="w-full h-full flex flex-col justify-center p-8 overflow-auto">
-							<!-- Images -->
-							${slide.imageBlobs.length > 0
-								? html`
-										<div class="flex flex-wrap gap-2 justify-center mb-4">
-											${slide.imageBlobs.map(
-												(src) => html` <img src="${src}" class="max-h-48 max-w-full object-contain rounded" /> `,
-											)}
-										</div>
-									`
-								: ""}
-							<!-- Text content -->
-							${slide.texts.map((text, idx) => {
-								// First text is usually the title
-								if (idx === 0 && slide.texts.length > 1) {
-									return html`<div class="text-2xl font-bold mb-4 text-center">${text}</div>`;
-								}
-								return html`<div class="text-base mb-2 ${idx === 0 ? "text-xl font-semibold text-center" : ""}">${text}</div>`;
-							})}
-							${slide.texts.length === 0 && slide.imageBlobs.length === 0
-								? html`<div class="text-gray-400 text-center italic">Empty slide</div>`
-								: ""}
-						</div>
-					</div>
+					${this.mode === "images" ? this.renderImageSlide() : this.renderParsedSlide()}
 				</div>
 
 				<!-- Navigation -->
-				${this.slides.length > 1
+				${this.totalSlides > 1
 					? html`
 							<div class="flex items-center justify-center gap-3 py-3 border-t border-border bg-background">
 								<button
@@ -212,11 +216,11 @@ export class PptxArtifact extends ArtifactElement {
 									Prev
 								</button>
 								<span class="text-sm text-muted-foreground">
-									Slide ${this.currentSlide + 1} of ${this.slides.length}
+									Slide ${this.currentSlide + 1} of ${this.totalSlides}
 								</span>
 								<button
 									class="px-3 py-1.5 text-sm rounded-md border border-border hover:bg-muted transition-colors disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer"
-									?disabled=${this.currentSlide === this.slides.length - 1}
+									?disabled=${this.currentSlide === this.totalSlides - 1}
 									@click=${() => this.goToSlide(this.currentSlide + 1)}
 								>
 									Next
@@ -224,6 +228,49 @@ export class PptxArtifact extends ArtifactElement {
 							</div>
 						`
 					: ""}
+			</div>
+		`;
+	}
+
+	/** Render a server-rendered PNG slide image */
+	private renderImageSlide(): TemplateResult {
+		return html`
+			<img
+				src="${this.slideImages[this.currentSlide]}"
+				class="max-w-full max-h-full object-contain rounded-lg shadow-lg"
+				alt="Slide ${this.currentSlide + 1}"
+			/>
+		`;
+	}
+
+	/** Render a client-parsed slide (JSZip fallback) */
+	private renderParsedSlide(): TemplateResult {
+		const slide = this.slides[this.currentSlide];
+		return html`
+			<div
+				class="w-full bg-white text-black rounded-lg shadow-lg overflow-hidden"
+				style="max-width: 960px; aspect-ratio: 16/9;"
+			>
+				<div class="w-full h-full flex flex-col justify-center p-8 overflow-auto">
+					${slide.imageBlobs.length > 0
+						? html`
+								<div class="flex flex-wrap gap-2 justify-center mb-4">
+									${slide.imageBlobs.map(
+										(src) => html` <img src="${src}" class="max-h-48 max-w-full object-contain rounded" /> `,
+									)}
+								</div>
+							`
+						: ""}
+					${slide.texts.map((text, idx) => {
+						if (idx === 0 && slide.texts.length > 1) {
+							return html`<div class="text-2xl font-bold mb-4 text-center">${text}</div>`;
+						}
+						return html`<div class="text-base mb-2 ${idx === 0 ? "text-xl font-semibold text-center" : ""}">${text}</div>`;
+					})}
+					${slide.texts.length === 0 && slide.imageBlobs.length === 0
+						? html`<div class="text-gray-400 text-center italic">Empty slide</div>`
+						: ""}
+				</div>
 			</div>
 		`;
 	}

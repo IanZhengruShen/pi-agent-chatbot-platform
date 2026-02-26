@@ -421,7 +421,12 @@ function onAgentEvent(event: AgentEvent): void {
 		if (cached?.args) {
 			const filePath = getRenderablePathFromArgs(cached.args);
 			const content = getContentFromArgs(cached.args);
-			if (filePath && content) {
+			const ext = filePath?.split(".").pop()?.toLowerCase();
+			// PPTX files need server-side conversion (LibreOffice → PNG slides),
+			// so always fetch even when inline content is available.
+			if (filePath && (ext === "pptx" || ext === "ppt")) {
+				fetchAndCreateFileArtifact(filePath);
+			} else if (filePath && content) {
 				createFileArtifact(filePath, content);
 			} else if (filePath && !content) {
 				fetchAndCreateFileArtifact(filePath);
@@ -640,7 +645,12 @@ async function fetchAndCreateFileArtifact(filePath: string) {
 		});
 		if (!res.ok) return;
 		const data = await res.json();
-		if (data.content) await createFileArtifact(filePath, data.content);
+		// PPTX: server returns pre-rendered slide images
+		if (data.encoding === "slides" && data.slides) {
+			await createFileArtifact(filePath, JSON.stringify(data.slides));
+		} else if (data.content) {
+			await createFileArtifact(filePath, data.content);
+		}
 	} catch (err) {
 		console.error("[artifacts] Failed to fetch file:", err);
 	}
@@ -659,7 +669,11 @@ async function reconstructFileArtifactsFromMessages(messages: AgentMessage[]) {
 			const args = (block as any).arguments;
 			const filePath = getRenderablePathFromArgs(args);
 			const content = getContentFromArgs(args);
-			if (filePath && content) {
+			const ext = filePath?.split(".").pop()?.toLowerCase();
+			if (filePath && (ext === "pptx" || ext === "ppt")) {
+				await fetchAndCreateFileArtifact(filePath);
+				trackDirFromPath(filePath);
+			} else if (filePath && content) {
 				await createFileArtifact(filePath, content);
 				trackDirFromPath(filePath);
 			}
