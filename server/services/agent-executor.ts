@@ -12,7 +12,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import { resolvePiCommand } from "../utils/resolve-command.js";
-import { PROVIDER_ENV_MAP, OAUTH_PROVIDER_ENV_MAP } from "../utils/provider-env-map.js";
+import { PROVIDER_ENV_MAP, OAUTH_PROVIDER_ENV_MAP, PROVIDER_CONFIG_ENV_MAP } from "../utils/provider-env-map.js";
 import type { Database, ProviderKeyRow, UserFileRow } from "../db/types.js";
 import type { CryptoService } from "./crypto.js";
 import type { StorageService } from "./storage.js";
@@ -58,7 +58,7 @@ export class AgentExecutor {
 
 		// Team-level provider keys
 		const keyResult = await this.db.query<ProviderKeyRow>(
-			`SELECT provider, encrypted_dek, encrypted_key, iv, key_version FROM provider_keys WHERE team_id = $1`,
+			`SELECT provider, encrypted_dek, encrypted_key, iv, key_version, config FROM provider_keys WHERE team_id = $1`,
 			[teamId],
 		);
 
@@ -72,6 +72,26 @@ export class AgentExecutor {
 				});
 				const envVar = PROVIDER_ENV_MAP[row.provider] || `${row.provider.toUpperCase().replace(/-/g, "_")}_API_KEY`;
 				env[envVar] = apiKey;
+
+				// Inject provider-specific config as env vars
+				const configMap = PROVIDER_CONFIG_ENV_MAP[row.provider];
+				if (configMap && row.config) {
+					for (const [field, envName] of Object.entries(configMap)) {
+						let value = row.config[field];
+						if (value === undefined || value === null || value === "") continue;
+
+						// Azure base URL needs /openai/v1 suffix for the AzureOpenAI SDK
+						if (field === "baseUrl" && row.provider === "azure-openai") {
+							let url = String(value).replace(/\/+$/, "");
+							if (!url.endsWith("/openai/v1")) {
+								url += "/openai/v1";
+							}
+							value = url;
+						}
+
+						env[envName] = String(value);
+					}
+				}
 			} catch (err) {
 				console.error(`[agent-executor] Failed to decrypt key for provider ${row.provider}:`, err);
 			}

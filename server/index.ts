@@ -77,17 +77,27 @@ async function main() {
 	}
 
 	// 1.1 Security headers (helmet)
+	// CDN domains allowed for HTML artifact rendering (interactive plots, etc.)
+	// Security note: artifacts run inside sandboxed iframes (allow-scripts only,
+	// NO allow-same-origin) so scripts cannot access the parent page context.
+	const trustedCDNs = [
+		"https://cdn.plot.ly",
+		"https://cdn.jsdelivr.net",
+		"https://cdnjs.cloudflare.com",
+		"https://unpkg.com",
+		"https://d3js.org",
+	];
 	app.use(
 		helmet({
 			contentSecurityPolicy: {
 				directives: {
 					defaultSrc: ["'self'"],
-					scriptSrc: ["'self'", ...(isDev ? ["'unsafe-eval'", "'unsafe-inline'"] : [])],
-					styleSrc: ["'self'", "'unsafe-inline'"],
-					imgSrc: ["'self'", "data:", "blob:"],
-					connectSrc: ["'self'", "ws:", "wss:"],
+					scriptSrc: ["'self'", "'unsafe-inline'", ...trustedCDNs, ...(isDev ? ["'unsafe-eval'"] : [])],
+					styleSrc: ["'self'", "'unsafe-inline'", ...trustedCDNs],
+					imgSrc: ["'self'", "data:", "blob:", "https:"],
+					connectSrc: ["'self'", "ws:", "wss:", ...trustedCDNs],
 					workerSrc: ["'self'", "blob:"],
-					fontSrc: ["'self'"],
+					fontSrc: ["'self'", ...trustedCDNs],
 					objectSrc: ["'none'"],
 					frameAncestors: ["'none'"],
 					...(isDev ? { scriptSrcAttr: ["'unsafe-inline'"] } : {}),

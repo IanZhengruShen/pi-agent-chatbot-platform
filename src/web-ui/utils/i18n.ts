@@ -48,6 +48,12 @@ declare module "@mariozechner/mini-lit" {
 		"Click the download button above to view it on your computer.": string;
 		"No content available": string;
 		"Failed to display text content": string;
+		"No slides found in the presentation": string;
+		"Failed to load presentation": string;
+		"Empty slide": string;
+		Prev: string;
+		Next: string;
+		Slide: string;
 		"API keys are required to use AI models. Get your keys from the provider's website.": string;
 		console: string;
 		"Copy output": string;
@@ -260,6 +266,12 @@ export const translations = {
 			"Click the download button above to view it on your computer.",
 		"No content available": "No content available",
 		"Failed to display text content": "Failed to display text content",
+		"No slides found in the presentation": "No slides found in the presentation",
+		"Failed to load presentation": "Failed to load presentation",
+		"Empty slide": "Empty slide",
+		Prev: "Prev",
+		Next: "Next",
+		Slide: "Slide",
 		"API keys are required to use AI models. Get your keys from the provider's website.":
 			"API keys are required to use AI models. Get your keys from the provider's website.",
 		console: "console",
@@ -481,6 +493,12 @@ export const translations = {
 			"Klicken Sie oben auf die Download-Schaltfläche, um die Datei auf Ihrem Computer anzuzeigen.",
 		"No content available": "Kein Inhalt verfügbar",
 		"Failed to display text content": "Textinhalt konnte nicht angezeigt werden",
+		"No slides found in the presentation": "Keine Folien in der Präsentation gefunden",
+		"Failed to load presentation": "Präsentation konnte nicht geladen werden",
+		"Empty slide": "Leere Folie",
+		Prev: "Zurück",
+		Next: "Weiter",
+		Slide: "Folie",
 		"API keys are required to use AI models. Get your keys from the provider's website.":
 			"API-Schlüssel sind erforderlich, um KI-Modelle zu verwenden. Holen Sie sich Ihre Schlüssel von der Website des Anbieters.",
 		console: "Konsole",

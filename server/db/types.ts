@@ -68,6 +68,7 @@ export interface ProviderKeyRow {
 	encrypted_key: Buffer;
 	iv: Buffer;
 	key_version: number;
+	config: Record<string, unknown>;
 	created_at: Date;
 	updated_at: Date;
 }

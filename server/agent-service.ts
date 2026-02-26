@@ -262,6 +262,10 @@ export class TenantBridge extends WsBridge {
 			args.push("--extension", memoryExt);
 		}
 
+		// Inject push-to-viewer extension (always available)
+		const pushToViewerExt = fileURLToPath(new URL("./extensions/push-to-viewer.ts", import.meta.url));
+		args.push("--extension", pushToViewerExt);
+
 		console.log(`[tenant-bridge] Spawning: ${command} ${args.join(" ")}`);
 
 		return spawn(command, args, {
@@ -300,6 +304,9 @@ export class TenantBridge extends WsBridge {
 			try {
 				const parsed = JSON.parse(line);
 				console.log(`[rpc→ws] ${parsed.type || "unknown"}${parsed.command ? ` (${parsed.command})` : ""}`);
+				if (parsed.type === "message_end" && parsed.message?.stopReason === "error") {
+					console.error(`[rpc→ws] ERROR: ${parsed.message?.errorMessage || JSON.stringify(parsed.message)}`);
+				}
 				this.ws.send(line);
 			} catch {
 				// Non-JSON output, ignore

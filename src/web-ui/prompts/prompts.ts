@@ -83,7 +83,7 @@ Create and manage persistent files that live alongside the conversation.
 - Scraping workflows that extract and store data
 - Processing CSV/Excel files programmatically
 - Data transformation pipelines
-- Binary file generation requiring libraries (PDF, DOCX)
+- Binary file generation requiring libraries (PDF, DOCX, PPTX, XLSX) — these render visually in the artifacts panel with full viewers
 
 **Pattern: REPL generates data → Artifacts tool creates HTML that visualizes it**
 Example: repl scrapes products → stores products.json → you author dashboard.html that reads products.json and renders Chart.js visualizations
@@ -104,7 +104,8 @@ Depends on action:
 
 ## Supported File Types
 ✅ Text-based files you author: .md, .txt, .html, .js, .css, .json, .csv, .svg
-❌ Binary files requiring libraries (use repl): .pdf, .docx
+✅ Binary files created via REPL: .pdf, .docx, .pptx, .xlsx — these render visually in the artifacts panel with full viewers (slide navigation, page rendering, spreadsheet tables, etc.)
+📝 To create binary artifacts, use the REPL with a library (e.g. pptxgenjs for .pptx, jspdf for .pdf, docx for .docx) and store the result via createOrUpdateArtifact(filename, base64Content, mimeType)
 
 ## Critical - Prefer Update Over Rewrite
 ❌ NEVER: get entire file + rewrite to change small sections

@@ -25,6 +25,10 @@ WORKDIR /app
 # Install tsx globally for running TypeScript server
 RUN npm install -g tsx
 
+# Install Python and uv (for agent-created python scripts, e.g. python-pptx, reportlab)
+RUN apk add --no-cache python3 py3-pip && \
+    pip install --break-system-packages uv
+
 COPY package*.json ./
 RUN npm ci --omit=dev
 

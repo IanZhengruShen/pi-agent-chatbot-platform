@@ -19,6 +19,16 @@ export const PROVIDER_ENV_MAP: Record<string, string> = {
 	"google-gemini-cli": "GEMINI_API_KEY",
 };
 
+/** Provider name → config field → environment variable name mapping. */
+export const PROVIDER_CONFIG_ENV_MAP: Record<string, Record<string, string>> = {
+	"azure-openai": {
+		baseUrl: "AZURE_OPENAI_BASE_URL",
+		resourceName: "AZURE_OPENAI_RESOURCE_NAME",
+		apiVersion: "AZURE_OPENAI_API_VERSION",
+		deploymentNameMap: "AZURE_OPENAI_DEPLOYMENT_NAME_MAP",
+	},
+};
+
 /** OAuth provider → environment variable name mapping. */
 export const OAUTH_PROVIDER_ENV_MAP: Record<string, string> = {
 	anthropic: "ANTHROPIC_API_KEY",
