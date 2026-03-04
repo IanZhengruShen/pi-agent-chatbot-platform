@@ -204,8 +204,11 @@ async function main() {
 			if (ext === "pptx" || ext === "ppt") {
 				try {
 					const { convertPptxToSlideImages } = await import("./services/pptx-converter.js");
-					const slides = await convertPptxToSlideImages(filePath);
-					res.json({ slides, encoding: "slides" });
+					const [slides, rawBuffer] = await Promise.all([
+						convertPptxToSlideImages(filePath),
+						fs.readFile(filePath),
+					]);
+					res.json({ slides, raw: rawBuffer.toString("base64"), encoding: "slides" });
 					return;
 				} catch (convErr: any) {
 					// LibreOffice/pdftoppm not installed — fall back to raw base64

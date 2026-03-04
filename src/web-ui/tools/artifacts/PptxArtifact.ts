@@ -32,6 +32,8 @@ export class PptxArtifact extends ArtifactElement {
 	@state() private error: string | null = null;
 	/** Server-rendered slide images (preferred path) */
 	@state() private slideImages: string[] = [];
+	/** Raw PPTX base64 for download (preserved when server renders slides) */
+	@state() private rawPptxBase64: string | null = null;
 	/** Client-parsed slide data (JSZip fallback) */
 	@state() private slides: SlideData[] = [];
 	@state() private currentSlide = 0;
@@ -47,6 +49,7 @@ export class PptxArtifact extends ArtifactElement {
 		this.error = null;
 		this.currentSlide = 0;
 		this.slideImages = [];
+		this.rawPptxBase64 = null;
 		this.slides = [];
 		this.mode = null;
 		this.parseContent();
@@ -80,13 +83,22 @@ export class PptxArtifact extends ArtifactElement {
 	}
 
 	public getHeaderButtons() {
+		// For server-rendered slides, use the preserved raw PPTX binary;
+		// for client-parsed mode, decode the base64 content directly.
+		const downloadContent =
+			this.mode === "images" && this.rawPptxBase64
+				? this.rawPptxBase64
+				: this.mode === "parsed"
+					? this.decodeBase64()
+					: this._content;
 		return html`
 			<div class="flex items-center gap-1">
 				${DownloadButton({
-					content: this.mode === "parsed" ? this.decodeBase64() : this._content,
+					content: downloadContent,
 					filename: this.filename,
 					mimeType: "application/vnd.openxmlformats-officedocument.presentationml.presentation",
 					title: i18n("Download"),
+					isBase64: this.mode === "images" && !!this.rawPptxBase64,
 				})}
 			</div>
 		`;
@@ -97,9 +109,17 @@ export class PptxArtifact extends ArtifactElement {
 
 		// Try JSON first (server-rendered slide images)
 		try {
-			const slides = JSON.parse(this._content);
-			if (Array.isArray(slides) && slides.length > 0) {
-				this.slideImages = slides.map((b64: string) => `data:image/png;base64,${b64}`);
+			const parsed = JSON.parse(this._content);
+			// New format: { slides: [...], raw: "base64..." }
+			if (parsed && typeof parsed === "object" && Array.isArray(parsed.slides) && parsed.slides.length > 0) {
+				this.slideImages = parsed.slides.map((b64: string) => `data:image/png;base64,${b64}`);
+				this.rawPptxBase64 = parsed.raw || null;
+				this.mode = "images";
+				return;
+			}
+			// Legacy format: plain array of base64 strings
+			if (Array.isArray(parsed) && parsed.length > 0) {
+				this.slideImages = parsed.map((b64: string) => `data:image/png;base64,${b64}`);
 				this.mode = "images";
 				return;
 			}

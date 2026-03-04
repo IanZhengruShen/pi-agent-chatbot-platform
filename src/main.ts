@@ -702,9 +702,9 @@ async function fetchAndCreateFileArtifact(filePath: string) {
 		});
 		if (!res.ok) return;
 		const data = await res.json();
-		// PPTX: server returns pre-rendered slide images
+		// PPTX: server returns pre-rendered slide images + raw binary for download
 		if (data.encoding === "slides" && data.slides) {
-			await createFileArtifact(filePath, JSON.stringify(data.slides));
+			await createFileArtifact(filePath, JSON.stringify({ slides: data.slides, raw: data.raw }));
 		} else if (data.content) {
 			await createFileArtifact(filePath, data.content);
 		}
