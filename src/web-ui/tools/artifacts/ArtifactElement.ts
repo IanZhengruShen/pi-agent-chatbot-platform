@@ -2,6 +2,7 @@ import { LitElement, type TemplateResult } from "lit";
 
 export abstract class ArtifactElement extends LitElement {
 	public filename = "";
+	public onContentChange?: (newContent: string) => void;
 
 	protected override createRenderRoot(): HTMLElement | DocumentFragment {
 		return this; // light DOM for shared styles

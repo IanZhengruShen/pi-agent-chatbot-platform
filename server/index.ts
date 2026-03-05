@@ -304,10 +304,8 @@ async function main() {
 			}
 		}
 
-		// Track CWD for agent-files endpoint
-		if (options.cwd) {
-			activeUserCwds.set(user.userId, options.cwd);
-		}
+		// Track CWD for agent-files endpoint (use explicit cwd or fall back to server CWD)
+		activeUserCwds.set(user.userId, options.cwd || process.cwd());
 
 		// Resolve agent profile if specified
 		const agentProfileId = url.searchParams.get("agentProfileId") || undefined;

@@ -215,6 +215,19 @@ export class ArtifactsPanel extends LitElement {
 			element.style.display = "none";
 			element.style.height = "100%";
 
+			// Wire up content change callback (for inline-editable artifacts like Excel)
+			element.onContentChange = (newContent: string) => {
+				const artifact = this._artifacts.get(filename);
+				if (artifact) {
+					artifact.content = newContent;
+					artifact.updatedAt = new Date();
+					this._artifacts.set(filename, artifact);
+					this._artifacts = new Map(this._artifacts);
+					this.reloadAllHtmlArtifacts();
+					this.onArtifactsChange?.();
+				}
+			};
+
 			// Store element
 			this.artifactElements.set(filename, element);
 
