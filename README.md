@@ -124,6 +124,10 @@ Built on published npm packages from the [pi-mono](https://github.com/nicholasga
 - `@mariozechner/pi-agent-core` — Agent runtime interface
 - `@mariozechner/pi-ai` — Unified LLM provider abstraction
 
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for a step-by-step guide on how to fork this repository and open a pull request against the upstream project.
+
 ## License
 
 Private
