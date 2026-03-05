@@ -3,16 +3,10 @@
  * Lists skills in a card grid, supports upload and delete.
  */
 
+import { apiFetch } from "../shared/api.js";
 import { LitElement, html, css, nothing } from "lit";
 import { customElement, property, state } from "lit/decorators.js";
-
-interface SkillInfo {
-	id: string;
-	scope: string;
-	name: string;
-	description: string;
-	created_at: string;
-}
+import type { SkillInfo } from "./types.js";
 
 type ScopeFilter = "all" | "platform" | "team" | "user";
 
@@ -260,17 +254,7 @@ export class SkillsTab extends LitElement {
 		this._loadSkills();
 	}
 
-	private async _fetchApi(url: string, options: RequestInit = {}): Promise<any> {
-		const token = this.getToken?.();
-		const res = await fetch(url, {
-			...options,
-			headers: {
-				...(token ? { Authorization: `Bearer ${token}` } : {}),
-				...options.headers,
-			},
-		});
-		return res.json();
-	}
+	private _fetchApi = (url: string, options?: RequestInit) => apiFetch(url, options, this.getToken);
 
 	private async _loadSkills() {
 		this.loading = true;

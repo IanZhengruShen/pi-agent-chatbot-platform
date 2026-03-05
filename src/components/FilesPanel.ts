@@ -4,16 +4,10 @@
  * Lists, uploads, and deletes user files.
  */
 
+import { apiFetch } from "../shared/api.js";
 import { LitElement, html, css } from "lit";
 import { customElement, property, state } from "lit/decorators.js";
-
-interface FileInfo {
-	id: string;
-	filename: string;
-	content_type: string | null;
-	size_bytes: number | null;
-	created_at: string;
-}
+import type { FileInfo } from "../studio/types.js";
 
 function formatBytes(bytes: number | null): string {
 	if (bytes == null) return "—";
@@ -157,17 +151,7 @@ export class FilesPanel extends LitElement {
 		this.loadFiles();
 	}
 
-	private async fetchApi(url: string, options: RequestInit = {}): Promise<any> {
-		const token = this.getToken?.();
-		const res = await fetch(url, {
-			...options,
-			headers: {
-				...(token ? { Authorization: `Bearer ${token}` } : {}),
-				...options.headers,
-			},
-		});
-		return res.json();
-	}
+	private fetchApi = (url: string, options?: RequestInit) => apiFetch(url, options, this.getToken);
 
 	private async loadFiles() {
 		this.loading = true;

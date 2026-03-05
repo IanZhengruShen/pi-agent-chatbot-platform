@@ -44,6 +44,9 @@ export interface SessionRow {
 	message_count: number;
 	preview: string;
 	agent_profile_id: string | null;
+	artifacts_cache: Record<string, string>;
+	session_status: "generating" | "idle" | "suspended" | "dead";
+	last_status_at: Date;
 	deleted_at: Date | null;
 	created_at: Date;
 	last_modified: Date;
@@ -68,6 +71,7 @@ export interface ProviderKeyRow {
 	encrypted_key: Buffer;
 	iv: Buffer;
 	key_version: number;
+	config: Record<string, unknown>;
 	created_at: Date;
 	updated_at: Date;
 }

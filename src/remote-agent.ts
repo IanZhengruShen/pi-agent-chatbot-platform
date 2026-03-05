@@ -22,8 +22,13 @@ const PLACEHOLDER_MODEL: Model<any> = {
 	api: "anthropic" as any,
 	provider: "anthropic",
 	id: "loading...",
+	name: "Loading...",
 	contextWindow: 200000,
-	pricing: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+	maxTokens: 64000,
+	reasoning: false,
+	input: ["text"],
+	baseUrl: "",
+	cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
 };
 
 /**

@@ -28,14 +28,15 @@ export function createProviderKeysRouter(crypto: CryptoService): Router {
 	// -----------------------------------------------------------------------
 	router.get("/", asyncRoute(async (req, res) => {
 		const db = getDatabase();
-		const result = await db.query<Pick<ProviderKeyRow, "provider" | "updated_at">>(
-			`SELECT provider, updated_at FROM provider_keys WHERE team_id = $1 ORDER BY provider`,
+		const result = await db.query<Pick<ProviderKeyRow, "provider" | "config" | "updated_at">>(
+			`SELECT provider, config, updated_at FROM provider_keys WHERE team_id = $1 ORDER BY provider`,
 			[req.user!.teamId],
 		);
 
 		const keys = result.rows.map((row) => ({
 			provider: row.provider,
 			hasKey: true,
+			config: row.config,
 			updatedAt: row.updated_at,
 		}));
 
@@ -46,7 +47,7 @@ export function createProviderKeysRouter(crypto: CryptoService): Router {
 	// POST / — Create or update a provider key
 	// -----------------------------------------------------------------------
 	router.post("/", asyncRoute(async (req, res) => {
-		const { provider, apiKey } = req.body;
+		const { provider, apiKey, config } = req.body;
 
 		if (!provider || typeof provider !== "string") {
 			res.status(400).json({ success: false, error: "provider is required" });
@@ -64,15 +65,40 @@ export function createProviderKeysRouter(crypto: CryptoService): Router {
 			return;
 		}
 
+		// Validate config if provided
+		let validatedConfig: Record<string, unknown> = {};
+		if (config && typeof config === "object" && !Array.isArray(config)) {
+			if (provider === "azure-openai") {
+				const allowedFields = ["baseUrl", "resourceName", "apiVersion", "deploymentNameMap"];
+				for (const [key, value] of Object.entries(config)) {
+					if (!allowedFields.includes(key)) continue;
+					if (value !== undefined && value !== null && value !== "" && typeof value !== "string") {
+						res.status(400).json({ success: false, error: `config.${key} must be a string` });
+						return;
+					}
+					if (value) validatedConfig[key] = value;
+				}
+				// Validate baseUrl is a valid URL
+				if (validatedConfig.baseUrl) {
+					try {
+						new URL(validatedConfig.baseUrl as string);
+					} catch {
+						res.status(400).json({ success: false, error: "config.baseUrl must be a valid URL" });
+						return;
+					}
+				}
+			}
+		}
+
 		const envelope = crypto.encrypt(apiKey);
 		const db = getDatabase();
 
 		await db.query(
-			`INSERT INTO provider_keys (team_id, provider, encrypted_dek, encrypted_key, iv, key_version)
-			 VALUES ($1, $2, $3, $4, $5, $6)
+			`INSERT INTO provider_keys (team_id, provider, encrypted_dek, encrypted_key, iv, key_version, config)
+			 VALUES ($1, $2, $3, $4, $5, $6, $7)
 			 ON CONFLICT (team_id, provider)
 			 DO UPDATE SET encrypted_dek = $3, encrypted_key = $4, iv = $5,
-			              key_version = $6, updated_at = now()`,
+			              key_version = $6, config = $7, updated_at = now()`,
 			[
 				req.user!.teamId,
 				provider,
@@ -80,6 +106,7 @@ export function createProviderKeysRouter(crypto: CryptoService): Router {
 				envelope.encryptedData,
 				envelope.iv,
 				envelope.keyVersion,
+				JSON.stringify(validatedConfig),
 			],
 		);
 

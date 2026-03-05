@@ -10,6 +10,8 @@ export const MODEL_LABELS: Record<string, string> = {
 	"claude-opus-4-20250514": "Claude Opus 4",
 	"claude-sonnet-4-20250514": "Claude Sonnet 4",
 	"claude-sonnet-4-5-20250514": "Claude Sonnet 4.5",
+	"claude-sonnet-4-6": "Claude Sonnet 4.6",
+	"claude-opus-4-6": "Claude Opus 4.6",
 	"claude-3-5-sonnet-20241022": "Claude 3.5 Sonnet",
 	"claude-3-5-haiku-20241022": "Claude 3.5 Haiku",
 	"claude-3-opus-20240229": "Claude 3 Opus",

@@ -159,8 +159,12 @@ export class WsBridge {
 		this.rl.on("line", (line) => {
 			if (this.closed) return;
 			try {
-				const parsed = JSON.parse(line);
-				console.log(`[rpc→ws] ${parsed.type || "unknown"}${parsed.command ? ` (${parsed.command})` : ""}`);
+				// Forward the raw line without re-parsing for every token.
+				// Only parse for debug-level logging of non-streaming events.
+				if (process.env.LOG_LEVEL === "debug") {
+					const parsed = JSON.parse(line);
+					console.log(`[rpc→ws] ${parsed.type || "unknown"}${parsed.command ? ` (${parsed.command})` : ""}`);
+				}
 				this.ws.send(line);
 			} catch {
 				// Non-JSON output, ignore

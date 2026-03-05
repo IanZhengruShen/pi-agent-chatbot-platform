@@ -128,9 +128,7 @@ export class SessionsStore extends Store {
 	async getLatestSessionId(): Promise<string | null> {
 		const allMetadata = await this.getAllMetadata();
 		if (allMetadata.length === 0) return null;
-
-		// Sort by lastModified descending
-		allMetadata.sort((a, b) => b.lastModified.localeCompare(a.lastModified));
+		// getAllMetadata() already returns sessions sorted DESC by lastModified
 		return allMetadata[0].id;
 	}
 }

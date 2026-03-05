@@ -1,12 +1,9 @@
 import { DownloadButton } from "@mariozechner/mini-lit/dist/DownloadButton.js";
 import { html, type TemplateResult } from "lit";
 import { customElement, property, state } from "lit/decorators.js";
-import * as pdfjsLib from "pdfjs-dist";
+import { getPdfjs } from "../../utils/lazy-imports.js";
 import { i18n } from "../../utils/i18n.js";
 import { ArtifactElement } from "./ArtifactElement.js";
-
-// Configure PDF.js worker
-pdfjsLib.GlobalWorkerOptions.workerSrc = new URL("pdfjs-dist/build/pdf.worker.min.mjs", import.meta.url).toString();
 
 @customElement("pdf-artifact")
 export class PdfArtifact extends ArtifactElement {
@@ -117,6 +114,7 @@ export class PdfArtifact extends ArtifactElement {
 			}
 
 			// Load the PDF
+			const pdfjsLib = await getPdfjs();
 			this.currentLoadingTask = pdfjsLib.getDocument({ data: arrayBuffer });
 			pdf = await this.currentLoadingTask.promise;
 			this.currentLoadingTask = null;

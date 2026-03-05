@@ -63,36 +63,40 @@ export async function resolveSkillsForUser(
 	const tmpBase = await fs.mkdtemp(path.join(os.tmpdir(), "pi-skills-"));
 	const skillPaths: string[] = [];
 
-	for (const skill of result.rows) {
-		try {
-			const skillDir = path.join(tmpBase, skill.name);
-			await fs.mkdir(skillDir, { recursive: true });
+	await Promise.all(
+		result.rows.map(async (skill) => {
+			try {
+				const skillDir = path.join(tmpBase, skill.name);
+				await fs.mkdir(skillDir, { recursive: true });
 
-			if (skill.format === "zip") {
-				// Restore full directory tree from stored files
-				const keys = await storage.listByPrefix(skill.storage_key);
-				for (const key of keys) {
-					const relativePath = key.startsWith(skill.storage_key)
-						? key.slice(skill.storage_key.length)
-						: key;
-					if (!relativePath) continue;
+				if (skill.format === "zip") {
+					// Restore full directory tree from stored files
+					const keys = await storage.listByPrefix(skill.storage_key);
+					await Promise.all(
+						keys.map(async (key) => {
+							const relativePath = key.startsWith(skill.storage_key)
+								? key.slice(skill.storage_key.length)
+								: key;
+							if (!relativePath) return;
 
-					const filePath = path.join(skillDir, relativePath);
-					await fs.mkdir(path.dirname(filePath), { recursive: true });
-					const data = await storage.download(key);
-					await fs.writeFile(filePath, data);
+							const filePath = path.join(skillDir, relativePath);
+							await fs.mkdir(path.dirname(filePath), { recursive: true });
+							const data = await storage.download(key);
+							await fs.writeFile(filePath, data);
+						}),
+					);
+				} else {
+					// Single SKILL.md file
+					const data = await storage.download(skill.storage_key);
+					await fs.writeFile(path.join(skillDir, "SKILL.md"), data);
 				}
-			} else {
-				// Single SKILL.md file
-				const data = await storage.download(skill.storage_key);
-				await fs.writeFile(path.join(skillDir, "SKILL.md"), data);
-			}
 
-			skillPaths.push(skillDir);
-		} catch (err) {
-			console.error(`[skill-resolver] Failed to resolve skill "${skill.name}":`, err);
-		}
-	}
+				skillPaths.push(skillDir);
+			} catch (err) {
+				console.error(`[skill-resolver] Failed to resolve skill "${skill.name}":`, err);
+			}
+		}),
+	);
 
 	const cleanup = () => {
 		fs.rm(tmpBase, { recursive: true, force: true }).catch((err) => {

@@ -50,6 +50,12 @@ export class AgentInterface extends LitElement {
 	private _resizeObserver?: ResizeObserver;
 	private _unsubscribeSession?: () => void;
 
+	// Memoization caches for renderMessages/renderStats
+	private _cachedToolResultsById = new Map<string, ToolResultMessage<any>>();
+	private _cachedToolResultsMsgLen = -1;
+	private _cachedStatsTotals: any = null;
+	private _cachedStatsMsgLen = -1;
+
 	public setInput(text: string, attachments?: Attachment[]) {
 		const update = () => {
 			if (!this._messageEditor) requestAnimationFrame(update);
@@ -181,7 +187,10 @@ export class AgentInterface extends LitElement {
 						this._streamingContainer.isStreaming = isStreaming;
 						this._streamingContainer.setMessage(ev.message, !isStreaming);
 					}
-					this.requestUpdate();
+					// StreamingMessageContainer manages its own render cycle via
+					// setMessage() → RAF → requestUpdate(). Skip re-rendering the
+					// entire AgentInterface (and its O(n) message list rebuild) on
+					// every streaming token.
 					break;
 			}
 		});
@@ -266,13 +275,18 @@ export class AgentInterface extends LitElement {
 		if (!this.session)
 			return html`<div class="p-4 text-center text-muted-foreground">${i18n("No session available")}</div>`;
 		const state = this.session.state;
-		// Build a map of tool results to allow inline rendering in assistant messages
-		const toolResultsById = new Map<string, ToolResultMessage<any>>();
-		for (const message of state.messages) {
-			if (message.role === "toolResult") {
-				toolResultsById.set(message.toolCallId, message);
+		// Rebuild toolResultsById only when message count changes
+		const msgLen = state.messages.length;
+		if (msgLen !== this._cachedToolResultsMsgLen) {
+			this._cachedToolResultsMsgLen = msgLen;
+			this._cachedToolResultsById = new Map();
+			for (const message of state.messages) {
+				if (message.role === "toolResult") {
+					this._cachedToolResultsById.set(message.toolCallId, message);
+				}
 			}
 		}
+		const toolResultsById = this._cachedToolResultsById;
 		return html`
 			<div class="flex flex-col gap-3">
 				<!-- Stable messages list - won't re-render during streaming -->
@@ -303,29 +317,35 @@ export class AgentInterface extends LitElement {
 		if (!this.session) return html`<div class="text-xs h-5"></div>`;
 
 		const state = this.session.state;
-		const totals = state.messages
-			.filter((m) => m.role === "assistant")
-			.reduce(
-				(acc, msg: any) => {
-					const usage = msg.usage;
-					if (usage) {
-						acc.input += usage.input;
-						acc.output += usage.output;
-						acc.cacheRead += usage.cacheRead;
-						acc.cacheWrite += usage.cacheWrite;
-						acc.cost.total += usage.cost.total;
-					}
-					return acc;
-				},
-				{
-					input: 0,
-					output: 0,
-					cacheRead: 0,
-					cacheWrite: 0,
-					totalTokens: 0,
-					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-				} satisfies Usage,
-			);
+		// Recompute stats only when message count changes
+		const msgLen = state.messages.length;
+		if (msgLen !== this._cachedStatsMsgLen) {
+			this._cachedStatsMsgLen = msgLen;
+			this._cachedStatsTotals = state.messages
+				.filter((m) => m.role === "assistant")
+				.reduce(
+					(acc, msg: any) => {
+						const usage = msg.usage;
+						if (usage) {
+							acc.input += usage.input;
+							acc.output += usage.output;
+							acc.cacheRead += usage.cacheRead;
+							acc.cacheWrite += usage.cacheWrite;
+							acc.cost.total += usage.cost.total;
+						}
+						return acc;
+					},
+					{
+						input: 0,
+						output: 0,
+						cacheRead: 0,
+						cacheWrite: 0,
+						totalTokens: 0,
+						cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+					} satisfies Usage,
+				);
+		}
+		const totals = this._cachedStatsTotals;
 
 		const hasTotals = totals.input || totals.output || totals.cacheRead || totals.cacheWrite;
 		const totalsText = hasTotals ? formatUsage(totals) : "";

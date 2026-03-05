@@ -19,6 +19,7 @@ export interface ProcessInfo {
 	sessionId: string;
 	lastActivity: number;
 	state: "starting" | "running" | "stopping" | "crashed";
+	generating: boolean;
 }
 
 export type StopReason = "idle" | "crash" | "manual" | "shutdown";
@@ -43,10 +44,13 @@ export class ProcessPool extends EventEmitter {
 	private readonly idleTimeoutMs: number;
 	private readonly gracePeriodMs: number;
 
+	private readonly aggressiveIdleTimeoutMs: number;
+
 	constructor(options: ProcessPoolOptions = {}) {
 		super();
 		this.maxProcesses = options.maxProcesses ?? parseInt(process.env.PROCESS_POOL_MAX || "30", 10);
-		this.idleTimeoutMs = options.idleTimeoutMs ?? parseInt(process.env.PROCESS_IDLE_TIMEOUT_MS || "600000", 10);
+		this.idleTimeoutMs = options.idleTimeoutMs ?? parseInt(process.env.PROCESS_IDLE_TIMEOUT_MS || "1800000", 10);
+		this.aggressiveIdleTimeoutMs = 5 * 60 * 1000; // 5 minutes when pool is near capacity
 		this.gracePeriodMs = options.gracePeriodMs ?? 5000;
 
 		const sweepInterval = options.sweepIntervalMs ?? 30_000;
@@ -90,6 +94,7 @@ export class ProcessPool extends EventEmitter {
 			sessionId: opts.sessionId,
 			lastActivity: Date.now(),
 			state: "starting",
+			generating: false,
 		};
 
 		this.processes.set(opts.sessionId, info);
@@ -143,6 +148,24 @@ export class ProcessPool extends EventEmitter {
 
 		info.lastActivity = Date.now();
 		this.clearIdleTimer(sessionId);
+	}
+
+	/** Mark a process as actively generating (clears idle timer). */
+	markGenerating(sessionId: string): void {
+		const info = this.processes.get(sessionId);
+		if (!info) return;
+		info.generating = true;
+		info.lastActivity = Date.now();
+		this.clearIdleTimer(sessionId);
+	}
+
+	/** Mark a process as idle (starts idle timer). */
+	markIdle(sessionId: string): void {
+		const info = this.processes.get(sessionId);
+		if (!info) return;
+		info.generating = false;
+		info.lastActivity = Date.now();
+		this.startIdleTimer(sessionId);
 	}
 
 	/** Get a process by session ID. */
@@ -246,10 +269,15 @@ export class ProcessPool extends EventEmitter {
 	/** Periodic sweep: reap processes that have been idle too long. */
 	private sweep(): void {
 		const now = Date.now();
+		// Use aggressive timeout when pool is near capacity (>=80%)
+		const highLoad = this.activeCount() / this.maxProcesses >= 0.8;
+		const timeout = highLoad ? this.aggressiveIdleTimeoutMs : this.idleTimeoutMs;
+
 		for (const [sessionId, info] of this.processes) {
+			if (info.generating) continue; // Never reap generating processes
 			if (
 				(info.state === "running" || info.state === "starting") &&
-				now - info.lastActivity > this.idleTimeoutMs &&
+				now - info.lastActivity > timeout &&
 				!this.idleTimers.has(sessionId)
 			) {
 				this.reapIdle(sessionId);
@@ -261,6 +289,7 @@ export class ProcessPool extends EventEmitter {
 	private reapIdle(sessionId: string): void {
 		const info = this.processes.get(sessionId);
 		if (!info || info.state === "stopping") return;
+		if (info.generating) return; // Never reap generating processes
 
 		console.log(`[process-pool] Reaping idle process for session ${sessionId}`);
 		info.state = "stopping";

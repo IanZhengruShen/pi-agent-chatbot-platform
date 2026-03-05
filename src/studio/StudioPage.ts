@@ -3,6 +3,7 @@
  * Supports three tabs: Profiles, Skills, Files.
  */
 
+import { apiFetch } from "../shared/api.js";
 import { LitElement, html, css, nothing } from "lit";
 import { customElement, property, state } from "lit/decorators.js";
 import type { ProfileInfo, SkillInfo, FileInfo, ProfileFormData } from "./types.js";
@@ -376,18 +377,7 @@ export class StudioPage extends LitElement {
 		}
 	}
 
-	private async _fetchApi(url: string, options: RequestInit = {}): Promise<any> {
-		const token = this.getToken?.();
-		const res = await fetch(url, {
-			...options,
-			headers: {
-				"Content-Type": "application/json",
-				...(token ? { Authorization: `Bearer ${token}` } : {}),
-				...options.headers,
-			},
-		});
-		return res.json();
-	}
+	private _fetchApi = (url: string, options?: RequestInit) => apiFetch(url, options, this.getToken);
 
 	private async _loadData() {
 		this.loading = true;

@@ -1,4 +1,4 @@
-import hljs from "highlight.js";
+import hljs from "../../utils/hljs.js";
 import { html } from "lit";
 import { customElement, property, state } from "lit/decorators.js";
 import { unsafeHTML } from "lit/directives/unsafe-html.js";

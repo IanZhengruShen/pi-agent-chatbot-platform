@@ -3,16 +3,10 @@
  * Lists files in a card grid, supports upload (file or folder), download, and delete.
  */
 
+import { apiFetch } from "../shared/api.js";
 import { LitElement, html, css, nothing } from "lit";
 import { customElement, property, state } from "lit/decorators.js";
-
-interface FileInfo {
-	id: string;
-	filename: string;
-	content_type: string | null;
-	size_bytes: number | null;
-	created_at: string;
-}
+import type { FileInfo } from "./types.js";
 
 function formatBytes(bytes: number | null): string {
 	if (bytes == null) return "\u2014";
@@ -268,17 +262,7 @@ export class FilesTab extends LitElement {
 		this._loadFiles();
 	}
 
-	private async _fetchApi(url: string, options: RequestInit = {}): Promise<any> {
-		const token = this.getToken?.();
-		const res = await fetch(url, {
-			...options,
-			headers: {
-				...(token ? { Authorization: `Bearer ${token}` } : {}),
-				...options.headers,
-			},
-		});
-		return res.json();
-	}
+	private _fetchApi = (url: string, options?: RequestInit) => apiFetch(url, options, this.getToken);
 
 	private async _loadFiles() {
 		this.loading = true;

@@ -20,6 +20,7 @@ import {
 	SessionsStore,
 	SettingsDialog,
 	SettingsStore,
+	SettingsTab,
 	setAppStorage,
 } from "./web-ui/index.js";
 import type { SessionMetadata } from "./web-ui/index.js";
@@ -31,6 +32,7 @@ import "./components/SchedulerPanel.js";
 import "./components/TasksDashboard.js";
 import "./components/AgentProfilesPanel.js";
 import "./components/MemoryPanel.js";
+import { TeamMembersTab } from "./components/TeamMembersPanel.js";
 import { html, render, nothing } from "lit";
 import {
 	Bot,
@@ -48,6 +50,7 @@ import {
 	Plus,
 	Puzzle,
 	Settings,
+	Square,
 	Trash2,
 	Wrench,
 } from "lucide";
@@ -82,6 +85,8 @@ let reconnectDelay = 1000; // Exponential backoff: 1s → 2s → 4s → ... → 
 const MAX_RECONNECT_DELAY = 30_000;
 let saveSessionTimer: ReturnType<typeof setTimeout> | undefined;
 let intentionalDisconnect = false; // Suppress reconnect on intentional disconnect
+let pendingSessionMessages: AgentMessage[] | null = null; // Messages to restore after WS reconnect
+let pendingArtifactsCache: Record<string, string> | null = null; // Cached binary artifact content to restore
 
 // Cache tool call arguments for detecting renderable file writes
 const pendingToolArgs = new Map<string, { toolName: string; args: any }>();
@@ -90,7 +95,12 @@ let lastKnownDir = "";
 // Track files we've already attempted to fetch (avoid duplicate fetches)
 const fetchedFileRefs = new Set<string>();
 
-import { RENDERABLE_EXTENSIONS, BINARY_EXTENSIONS } from "./shared/file-extensions.js";
+import { RENDERABLE_EXTENSIONS, BINARY_EXTENSIONS, ARTIFACT_AUTO_DETECT_EXTENSIONS } from "./shared/file-extensions.js";
+
+// Session status tracking (from SSE)
+type SessionStatus = "generating" | "idle" | "suspended" | "dead";
+let sessionStatusMap = new Map<string, SessionStatus>();
+let sessionStatusEventSource: EventSource | null = null;
 
 // Sidebar & dropdown state
 let sidebarOpen = true;
@@ -116,6 +126,8 @@ interface AgentProfileInfo {
 }
 let agentProfiles: AgentProfileInfo[] = [];
 let currentAgentProfileId: string | undefined;
+let currentModelId: string | undefined;
+let currentProvider: string | undefined;
 
 // ============================================================================
 // Storage setup (ApiStorageBackend replaces IndexedDB)
@@ -183,6 +195,18 @@ const saveSession = async () => {
 	if (!shouldSaveSession(state.messages)) return;
 
 	try {
+		// Capture binary artifact content (PPTX slides, etc.) for persistence
+		const artifactsCache: Record<string, string> = {};
+		const panel = chatPanel?.artifactsPanel;
+		if (panel) {
+			for (const [filename, artifact] of panel.artifacts) {
+				const ext = filename.split(".").pop()?.toLowerCase();
+				if (ext && BINARY_EXTENSIONS.has(ext) && artifact.content) {
+					artifactsCache[filename] = artifact.content;
+				}
+			}
+		}
+
 		const sessionData = {
 			id: currentSessionId,
 			title: currentTitle,
@@ -192,6 +216,7 @@ const saveSession = async () => {
 			agentProfileId: currentAgentProfileId || null,
 			createdAt: new Date().toISOString(),
 			lastModified: new Date().toISOString(),
+			...(Object.keys(artifactsCache).length > 0 ? { artifactsCache } : {}),
 		};
 
 		const metadata = {
@@ -232,30 +257,44 @@ const loadSession = async (sessionId: string): Promise<boolean> => {
 	}
 
 	const metadata = await storage.sessions.getMetadata(sessionId);
-	currentSessionId = sessionId;
-	currentTitle = metadata?.title || "";
-	// Restore agent profile from session metadata
-	currentAgentProfileId = (metadata as any)?.agentProfileId || undefined;
 
-	// Load saved messages without resetting the server
-	// (Server can't restore old context, but we can show read-only history)
-	if (remoteAgent) {
-		// Use the public method to load messages and notify UI
-		remoteAgent.loadMessagesFromStorage(sessionData.messages);
-
-		// Force UI components to re-render with loaded messages
-		if (chatPanel?.agentInterface) {
-			chatPanel.agentInterface.requestUpdate();
-		}
-
-		// Clear previous session's artifacts, then reconstruct from loaded messages
-		chatPanel?.artifactsPanel?.clear();
-		fetchedFileRefs.clear();
-		reconstructFileArtifactsFromMessages(sessionData.messages);
+	// Save current session before switching (if there's anything to save)
+	clearTimeout(saveSessionTimer);
+	if (currentSessionId && remoteAgent) {
+		saveSession();
 	}
 
+	// Store messages and artifact cache to restore after WebSocket reconnects
+	pendingSessionMessages = sessionData.messages;
+	pendingArtifactsCache = (sessionData as any).artifactsCache ?? null;
+
+	// Disconnect old WebSocket cleanly (listeners removed, no stale reconnects)
+	disconnectWebSocket();
+
+	// Update state for the new session
+	currentSessionId = sessionId;
+	currentTitle = metadata?.title || "";
+	currentAgentProfileId = (metadata as any)?.agentProfileId || undefined;
+	currentModelId = undefined;
+	currentProvider = undefined;
+	chatPanel?.artifactsPanel?.clear();
+	fetchedFileRefs.clear();
+
+	// Reconnect — the URL will include the sessionId + agentProfileId
+	connectWebSocket();
 	renderApp();
 	return true;
+};
+
+const abortSession = async (sessionId: string) => {
+	try {
+		await fetch("/api/sessions/" + sessionId + "/abort", {
+			method: "POST",
+			headers: { Authorization: "Bearer " + authClient.token },
+		});
+	} catch (err) {
+		console.error("Failed to abort session:", err);
+	}
 };
 
 const deleteSession = async (sessionId: string) => {
@@ -387,11 +426,28 @@ function getWsUrl(): string {
 	if (currentAgentProfileId) {
 		url += `&agentProfileId=${encodeURIComponent(currentAgentProfileId)}`;
 	}
+	if (currentProvider) {
+		url += `&provider=${encodeURIComponent(currentProvider)}`;
+	}
+	if (currentModelId) {
+		url += `&model=${encodeURIComponent(currentModelId)}`;
+	}
 	return url;
+}
+
+function trackCurrentModel(): void {
+	const model = remoteAgent?.state.model;
+	if (model?.id) {
+		currentModelId = model.id;
+		currentProvider = model.provider;
+	}
 }
 
 function onAgentEvent(event: AgentEvent): void {
 	const messages = remoteAgent!.state.messages;
+
+	// Track model changes (e.g. user switches model mid-session)
+	trackCurrentModel();
 
 	// Generate title after first successful response
 	if (!currentTitle && shouldSaveSession(messages)) {
@@ -421,7 +477,12 @@ function onAgentEvent(event: AgentEvent): void {
 		if (cached?.args) {
 			const filePath = getRenderablePathFromArgs(cached.args);
 			const content = getContentFromArgs(cached.args);
-			if (filePath && content) {
+			const ext = filePath?.split(".").pop()?.toLowerCase();
+			// PPTX files need server-side conversion (LibreOffice → PNG slides),
+			// so always fetch even when inline content is available.
+			if (filePath && (ext === "pptx" || ext === "ppt")) {
+				fetchAndCreateFileArtifact(filePath);
+			} else if (filePath && content) {
 				createFileArtifact(filePath, content);
 			} else if (filePath && !content) {
 				fetchAndCreateFileArtifact(filePath);
@@ -455,12 +516,30 @@ async function onWebSocketOpen(): Promise<void> {
 
 	renderApp();
 
+	// Restore messages from a previous session if switching via sidebar
+	const restoredFromStorage = pendingSessionMessages != null;
+	if (pendingSessionMessages) {
+		const messages = pendingSessionMessages;
+		const cachedArtifacts = pendingArtifactsCache;
+		pendingSessionMessages = null;
+		pendingArtifactsCache = null;
+
+		remoteAgent.loadMessagesFromStorage(messages);
+		if (chatPanel?.agentInterface) {
+			chatPanel.agentInterface.requestUpdate();
+		}
+		reconstructFileArtifactsFromMessages(messages, cachedArtifacts ?? undefined);
+	}
+
 	try {
 		await remoteAgent.syncState();
+		trackCurrentModel();
 		chatPanel.agentInterface?.requestUpdate();
-		remoteAgent.fetchMessages().catch((err) => {
-			console.error("Failed to fetch messages:", err);
-		});
+		if (!restoredFromStorage) {
+			remoteAgent.fetchMessages().catch((err) => {
+				console.error("Failed to fetch messages:", err);
+			});
+		}
 	} catch (err) {
 		console.error("Failed to sync initial state:", err);
 	}
@@ -475,6 +554,19 @@ function onWebSocketClose(event: CloseEvent): void {
 	// If this close was triggered by intentional disconnect (profile switch, etc.),
 	// skip session save and reconnect — the caller handles the next connection.
 	if (intentionalDisconnect) {
+		return;
+	}
+
+	// Handle generating limit exceeded — no auto-reconnect
+	if (event.code === 4031) {
+		wsConnected = false;
+		remoteAgent = null;
+		if (agentUnsubscribe) {
+			agentUnsubscribe();
+			agentUnsubscribe = undefined;
+		}
+		alert("You have 3 sessions actively running. Stop one before starting another.");
+		renderApp();
 		return;
 	}
 
@@ -593,6 +685,8 @@ function selectAgentProfile(profileId: string | undefined): void {
 	currentAgentProfileId = profileId;
 	currentSessionId = undefined;
 	currentTitle = "";
+	currentModelId = undefined;
+	currentProvider = undefined;
 	chatPanel?.artifactsPanel?.clear();
 	fetchedFileRefs.clear();
 
@@ -601,16 +695,85 @@ function selectAgentProfile(profileId: string | undefined): void {
 }
 
 // ============================================================================
+// Session status SSE subscription
+// ============================================================================
+
+function initSessionStatusSSE(): void {
+	if (sessionStatusEventSource) {
+		sessionStatusEventSource.close();
+		sessionStatusEventSource = null;
+	}
+
+	const connect = async () => {
+		try {
+			// Get SSE ticket
+			const ticketRes = await fetch("/api/auth/sse-ticket", {
+				method: "POST",
+				headers: { Authorization: `Bearer ${authClient.token}` },
+			});
+			if (!ticketRes.ok) return;
+			const ticketData = await ticketRes.json();
+			const ticket = ticketData?.data?.ticket;
+			if (!ticket) return;
+
+			const es = new EventSource(`/api/sessions/events?ticket=${encodeURIComponent(ticket)}`);
+			sessionStatusEventSource = es;
+
+			es.addEventListener("snapshot", (e: MessageEvent) => {
+				try {
+					const snapshot = JSON.parse(e.data) as Record<string, SessionStatus>;
+					sessionStatusMap = new Map(Object.entries(snapshot));
+					renderApp();
+				} catch {}
+			});
+
+			es.addEventListener("session_status", (e: MessageEvent) => {
+				try {
+					const event = JSON.parse(e.data) as { sessionId: string; status: SessionStatus };
+					sessionStatusMap.set(event.sessionId, event.status);
+					renderApp();
+				} catch {}
+			});
+
+			es.onerror = () => {
+				es.close();
+				sessionStatusEventSource = null;
+				// Retry after 5s with new ticket
+				setTimeout(connect, 5000);
+			};
+		} catch {
+			setTimeout(connect, 5000);
+		}
+	};
+
+	connect();
+}
+
+function closeSessionStatusSSE(): void {
+	if (sessionStatusEventSource) {
+		sessionStatusEventSource.close();
+		sessionStatusEventSource = null;
+	}
+	sessionStatusMap.clear();
+}
+
+// ============================================================================
 // File artifact detection helpers
 // ============================================================================
 
-/** Extract renderable file path from tool args (supports various arg shapes) */
+/** Extract renderable file path from tool args (supports various arg shapes).
+ *  Only returns paths for "final output" file types (documents, images, rich visuals).
+ *  Filters out temp/skill files to keep the artifacts panel clean. */
 function getRenderablePathFromArgs(args: any): string | null {
 	if (!args || typeof args !== "object") return null;
 	const filePath = args.path || args.filePath || args.file_path || args.filename || "";
 	if (typeof filePath !== "string" || filePath.length === 0) return null;
+	// Skip files in temp directories (skill files, system prompt files, etc.)
+	if (filePath.startsWith("/tmp/") || filePath.includes("/pi-skills-") || filePath.includes("/pi-sysprompt-")) {
+		return null;
+	}
 	const ext = filePath.split(".").pop()?.toLowerCase();
-	if (ext && RENDERABLE_EXTENSIONS.has(ext)) {
+	if (ext && ARTIFACT_AUTO_DETECT_EXTENSIONS.has(ext)) {
 		return filePath;
 	}
 	return null;
@@ -640,14 +803,22 @@ async function fetchAndCreateFileArtifact(filePath: string) {
 		});
 		if (!res.ok) return;
 		const data = await res.json();
-		if (data.content) await createFileArtifact(filePath, data.content);
+		// PPTX: server returns pre-rendered slide images + raw binary for download
+		if (data.encoding === "slides" && data.slides) {
+			await createFileArtifact(filePath, JSON.stringify({ slides: data.slides, raw: data.raw }));
+		} else if (data.content) {
+			await createFileArtifact(filePath, data.content);
+		}
 	} catch (err) {
 		console.error("[artifacts] Failed to fetch file:", err);
 	}
 }
 
 /** Scan messages for renderable file writes and reconstruct artifacts */
-async function reconstructFileArtifactsFromMessages(messages: AgentMessage[]) {
+async function reconstructFileArtifactsFromMessages(
+	messages: AgentMessage[],
+	artifactsCache?: Record<string, string>,
+) {
 	const panel = chatPanel?.artifactsPanel;
 	if (!panel) return;
 
@@ -659,7 +830,16 @@ async function reconstructFileArtifactsFromMessages(messages: AgentMessage[]) {
 			const args = (block as any).arguments;
 			const filePath = getRenderablePathFromArgs(args);
 			const content = getContentFromArgs(args);
-			if (filePath && content) {
+			const ext = filePath?.split(".").pop()?.toLowerCase();
+			if (filePath && (ext === "pptx" || ext === "ppt")) {
+				const filename = filePath.split("/").pop() || filePath;
+				if (artifactsCache && artifactsCache[filename]) {
+					await createFileArtifact(filePath, artifactsCache[filename]);
+				} else {
+					await fetchAndCreateFileArtifact(filePath);
+				}
+				trackDirFromPath(filePath);
+			} else if (filePath && content) {
 				await createFileArtifact(filePath, content);
 				trackDirFromPath(filePath);
 			}
@@ -861,15 +1041,16 @@ const renderApp = () => {
 					<div class="px-3 py-2">
 						<button
 							class="w-full flex items-center gap-2 px-3 py-2 rounded-md text-sm font-medium border border-border hover:bg-muted transition-colors cursor-pointer"
-							@click=${async () => {
-								if (remoteAgent) {
-									currentSessionId = undefined;
-									currentTitle = "";
-									chatPanel?.artifactsPanel?.clear();
-									fetchedFileRefs.clear();
-									await remoteAgent.newSession();
-									renderApp();
-								}
+							@click=${() => {
+								clearTimeout(saveSessionTimer);
+								if (currentSessionId && remoteAgent) saveSession();
+								disconnectWebSocket();
+								currentSessionId = undefined;
+								currentTitle = "";
+								chatPanel?.artifactsPanel?.clear();
+								fetchedFileRefs.clear();
+								connectWebSocket();
+								renderApp();
 							}}
 						>
 							${icon(Plus, "sm")}
@@ -884,13 +1065,33 @@ const renderApp = () => {
 						` : sessionGroups.map((group) => html`
 							<div class="mb-2">
 								<div class="text-xs font-medium text-muted-foreground px-2 py-1">${group.label}</div>
-								${group.sessions.map((session) => html`
+								${group.sessions.map((session) => {
+									const status = sessionStatusMap.get(session.id);
+									const isGenerating = status === "generating";
+									const isIdle = status === "idle";
+									return html`
 									<div
 										class="group flex items-center gap-1 px-2 py-1.5 rounded-md text-sm cursor-pointer transition-colors ${session.id === currentSessionId ? "bg-muted font-medium" : "hover:bg-muted/60"}"
 										@click=${() => loadSession(session.id)}
 									>
-										${icon(MessageSquare, "sm")}
+										<span class="relative shrink-0">
+											${icon(MessageSquare, "sm")}
+											${isGenerating ? html`<span class="absolute -top-0.5 -right-0.5 w-2 h-2 rounded-full bg-orange-500 animate-pulse"></span>` : nothing}
+											${isIdle ? html`<span class="absolute -top-0.5 -right-0.5 w-2 h-2 rounded-full bg-orange-400"></span>` : nothing}
+										</span>
 										<span class="flex-1 truncate">${session.title || "Untitled"}</span>
+										${isGenerating && session.id !== currentSessionId ? html`
+											<button
+												class="opacity-0 group-hover:opacity-100 p-0.5 rounded hover:bg-orange-500/10 hover:text-orange-500 transition-opacity cursor-pointer"
+												title="Stop generating"
+												@click=${(e: Event) => {
+													e.stopPropagation();
+													abortSession(session.id);
+												}}
+											>
+												${icon(Square, "sm")}
+											</button>
+										` : nothing}
 										<button
 											class="opacity-0 group-hover:opacity-100 p-0.5 rounded hover:bg-destructive/10 hover:text-destructive transition-opacity cursor-pointer"
 											title="Delete session"
@@ -899,7 +1100,7 @@ const renderApp = () => {
 											${icon(Trash2, "sm")}
 										</button>
 									</div>
-								`)}
+								`})}
 							</div>
 						`)}
 					</div>
@@ -1151,7 +1352,14 @@ const renderApp = () => {
 									<div class="px-3 py-2 text-xs text-muted-foreground border-b border-border">${user?.email || ""}</div>
 									<button class="w-full flex items-center gap-2 px-3 py-2 text-sm hover:bg-muted transition-colors text-left cursor-pointer" @click=${() => {
 										userMenuOpen = false;
-										SettingsDialog.open([new ProvidersModelsTab(), new ProxyTab()]);
+										const tabs: SettingsTab[] = [new ProvidersModelsTab(), new ProxyTab()];
+										if (user?.role === "admin") {
+											const t = new TeamMembersTab();
+											t.getToken = () => authClient.token;
+											t.currentUserId = user?.userId || "";
+											tabs.push(t);
+										}
+										SettingsDialog.open(tabs);
 										renderApp();
 									}}>
 										${icon(Settings, "sm")}
@@ -1204,11 +1412,13 @@ function onAuthSuccess() {
 	fetchSkills();
 	fetchAgentProfiles();
 	loadSidebarSessions();
+	initSessionStatusSSE();
 	renderApp();
 }
 
 function handleLogout() {
 	disconnectWebSocket();
+	closeSessionStatusSSE();
 	storage = null;
 	sidebarSessions = [];
 	currentSessionId = undefined;
@@ -1243,6 +1453,7 @@ async function initApp() {
 			fetchSkills();
 			fetchAgentProfiles();
 			loadSidebarSessions();
+			initSessionStatusSSE();
 		} else {
 			// Token expired/invalid — show login
 			authClient.logout();

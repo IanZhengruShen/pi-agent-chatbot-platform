@@ -1,0 +1,72 @@
+# Production deployment with Traefik reverse proxy
+# Usage: docker compose up -d
+# Requires: external 'web' network with Traefik already running
+# Set APP_HOSTNAME in .env (e.g., chatbot.dev01.datascience-tmnl.nl)
+
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        - http_proxy=${http_proxy:-}
+        - https_proxy=${https_proxy:-}
+        - no_proxy=${no_proxy:-}
+    env_file:
+      - .env
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.services.chatbot.loadbalancer.server.port=3001"
+      # HTTPS
+      - "traefik.http.routers.chatbot-secure.rule=Host(`${APP_HOSTNAME}`)"
+      - "traefik.http.routers.chatbot-secure.entrypoints=websecure"
+      - "traefik.http.routers.chatbot-secure.tls=true"
+      - "traefik.http.routers.chatbot-secure.tls.certresolver=letsencrypt_resolver"
+      # HTTP (redirect to HTTPS is handled by the app)
+      - "traefik.http.routers.chatbot.rule=Host(`${APP_HOSTNAME}`)"
+      - "traefik.http.routers.chatbot.entrypoints=web"
+    volumes:
+      - appdata:/app/data
+    networks:
+      - web
+      - internal
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-chatbot}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB:-chatbot_platform}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-chatbot} -d ${POSTGRES_DB:-chatbot_platform}"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    networks:
+      - internal
+
+  redis:
+    image: redis:7-alpine
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    networks:
+      - internal
+
+volumes:
+  pgdata:
+  appdata:
+
+networks:
+  web:
+    external: true
+  internal:

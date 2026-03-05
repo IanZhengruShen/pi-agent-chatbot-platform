@@ -9,6 +9,7 @@
  * - Re-run and cancel tasks
  */
 
+import { apiFetch } from "../shared/api.js";
 import { LitElement, html, css } from "lit";
 import { customElement, property, state } from "lit/decorators.js";
 
@@ -38,16 +39,8 @@ interface TaskArtifact {
 	size_bytes: number | null;
 }
 
-interface Skill {
-	id: string;
-	name: string;
-	scope: string;
-}
-
-interface UserFile {
-	id: string;
-	filename: string;
-}
+type Skill = Pick<import("../studio/types.js").SkillInfo, "id" | "name" | "scope">;
+type UserFile = Pick<import("../studio/types.js").FileInfo, "id" | "filename">;
 
 @customElement("tasks-dashboard")
 export class TasksDashboard extends LitElement {
@@ -339,18 +332,7 @@ export class TasksDashboard extends LitElement {
 		this.eventSources.clear();
 	}
 
-	private async fetchApi(url: string, options: RequestInit = {}): Promise<any> {
-		const token = this.getToken?.();
-		const res = await fetch(url, {
-			...options,
-			headers: {
-				"Content-Type": "application/json",
-				...(token ? { Authorization: `Bearer ${token}` } : {}),
-				...options.headers,
-			},
-		});
-		return res.json();
-	}
+	private fetchApi = (url: string, options?: RequestInit) => apiFetch(url, options, this.getToken);
 
 	private async loadTasks() {
 		this.loading = true;

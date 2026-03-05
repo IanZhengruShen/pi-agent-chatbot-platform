@@ -6,16 +6,10 @@
  * Admins can manage platform/team skills.
  */
 
+import { apiFetch } from "../shared/api.js";
 import { LitElement, html, css } from "lit";
 import { customElement, property, state } from "lit/decorators.js";
-
-interface SkillInfo {
-	id: string;
-	scope: string;
-	name: string;
-	description: string;
-	created_at: string;
-}
+import type { SkillInfo } from "../studio/types.js";
 
 @customElement("skills-panel")
 export class SkillsPanel extends LitElement {
@@ -75,6 +69,27 @@ export class SkillsPanel extends LitElement {
 			border-radius: 0.5rem;
 			background: var(--card, #fff);
 		}
+		.drop-zone {
+			border: 2px dashed var(--border, #e5e7eb);
+			border-radius: 0.5rem;
+			padding: 1.5rem;
+			text-align: center;
+			cursor: pointer;
+			transition: border-color 0.15s, background 0.15s;
+			color: var(--muted-foreground, #6b7280);
+			font-size: 0.875rem;
+		}
+		.drop-zone:hover {
+			border-color: var(--primary, #2563eb);
+		}
+		.drop-zone.drag-over {
+			border-color: var(--primary, #2563eb);
+			background: color-mix(in srgb, var(--primary, #2563eb) 5%, transparent);
+		}
+		.drop-zone .file-name {
+			color: var(--foreground, #111);
+			font-weight: 500;
+		}
 		.form-row {
 			display: flex;
 			gap: 0.5rem;
@@ -91,7 +106,7 @@ export class SkillsPanel extends LitElement {
 			font-weight: 500;
 			color: var(--muted-foreground, #6b7280);
 		}
-		select, input[type="file"] {
+		select {
 			padding: 0.5rem;
 			border: 1px solid var(--border, #e5e7eb);
 			border-radius: 0.375rem;
@@ -152,23 +167,14 @@ export class SkillsPanel extends LitElement {
 	@state() private statusType: "success" | "error" = "success";
 	@state() private selectedScope = "user";
 	@state() private selectedFile: File | null = null;
+	@state() private dragOver = false;
 
 	override connectedCallback() {
 		super.connectedCallback();
 		this.loadSkills();
 	}
 
-	private async fetchApi(url: string, options: RequestInit = {}): Promise<any> {
-		const token = this.getToken?.();
-		const res = await fetch(url, {
-			...options,
-			headers: {
-				...(token ? { Authorization: `Bearer ${token}` } : {}),
-				...options.headers,
-			},
-		});
-		return res.json();
-	}
+	private fetchApi = (url: string, options?: RequestInit) => apiFetch(url, options, this.getToken);
 
 	private async loadSkills() {
 		this.loading = true;
@@ -207,7 +213,7 @@ export class SkillsPanel extends LitElement {
 				this.statusType = "success";
 				this.selectedFile = null;
 				// Reset file input
-				const fileInput = this.shadowRoot?.querySelector('input[type="file"]') as HTMLInputElement;
+				const fileInput = this.shadowRoot?.querySelector<HTMLInputElement>("#file-input");
 				if (fileInput) fileInput.value = "";
 				await this.loadSkills();
 			} else {
@@ -286,23 +292,43 @@ export class SkillsPanel extends LitElement {
 					`}
 
 			<div class="upload-form">
+				<input
+					id="file-input"
+					type="file"
+					accept=".md,.zip"
+					style="display: none"
+					@change=${(e: Event) => {
+						const input = e.target as HTMLInputElement;
+						this.selectedFile = input.files?.[0] || null;
+					}}
+				/>
+				<div
+					class="drop-zone ${this.dragOver ? "drag-over" : ""}"
+					@click=${() => this.shadowRoot?.querySelector<HTMLInputElement>("#file-input")?.click()}
+					@dragover=${(e: DragEvent) => { e.preventDefault(); this.dragOver = true; }}
+					@dragleave=${() => { this.dragOver = false; }}
+					@drop=${(e: DragEvent) => {
+						e.preventDefault();
+						this.dragOver = false;
+						const file = e.dataTransfer?.files[0];
+						if (file && (file.name.endsWith(".md") || file.name.endsWith(".zip"))) {
+							this.selectedFile = file;
+						} else if (file) {
+							this.statusMessage = "Only .md and .zip files are supported";
+							this.statusType = "error";
+						}
+					}}
+				>
+					${this.selectedFile
+						? html`<span class="file-name">${this.selectedFile.name}</span>`
+						: html`Drop a .md or .zip file here, or click to browse`}
+				</div>
 				<div class="form-row">
 					<div class="form-field">
 						<label>Scope</label>
 						<select .value=${this.selectedScope} @change=${(e: Event) => (this.selectedScope = (e.target as HTMLSelectElement).value)}>
 							${scopes.map((s) => html`<option value=${s.value}>${s.label}</option>`)}
 						</select>
-					</div>
-					<div class="form-field">
-						<label>Skill File</label>
-						<input
-							type="file"
-							accept=".md,.zip"
-							@change=${(e: Event) => {
-								const input = e.target as HTMLInputElement;
-								this.selectedFile = input.files?.[0] || null;
-							}}
-						/>
 					</div>
 					<button
 						class="btn-primary"

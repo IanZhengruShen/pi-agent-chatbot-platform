@@ -1,5 +1,5 @@
 import { DownloadButton } from "@mariozechner/mini-lit/dist/DownloadButton.js";
-import { renderAsync } from "docx-preview";
+import { getDocxPreview } from "../../utils/lazy-imports.js";
 import { html, type TemplateResult } from "lit";
 import { customElement, property, state } from "lit/decorators.js";
 import { i18n } from "../../utils/i18n.js";
@@ -102,6 +102,7 @@ export class DocxArtifact extends ArtifactElement {
 			container.appendChild(wrapper);
 
 			// Render the DOCX file into the wrapper
+			const { renderAsync } = await getDocxPreview();
 			await renderAsync(arrayBuffer, wrapper as HTMLElement, undefined, {
 				className: "docx",
 				inWrapper: true,

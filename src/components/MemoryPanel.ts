@@ -5,6 +5,7 @@
  * Memories are automatically injected into agent sessions.
  */
 
+import { apiFetch } from "../shared/api.js";
 import { LitElement, html, css, nothing } from "lit";
 import { customElement, property, state } from "lit/decorators.js";
 
@@ -235,18 +236,7 @@ export class MemoryPanel extends LitElement {
 		this.loadMemories();
 	}
 
-	private async fetchApi(url: string, options: RequestInit = {}): Promise<any> {
-		const token = this.getToken?.();
-		const res = await fetch(url, {
-			...options,
-			headers: {
-				"Content-Type": "application/json",
-				...(token ? { Authorization: `Bearer ${token}` } : {}),
-				...options.headers,
-			},
-		});
-		return res.json();
-	}
+	private fetchApi = (url: string, options?: RequestInit) => apiFetch(url, options, this.getToken);
 
 	private async loadMemories() {
 		this.loading = true;

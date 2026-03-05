@@ -5,12 +5,14 @@
  * Keys are stored server-side with envelope encryption.
  */
 
+import { apiFetch } from "../shared/api.js";
 import { LitElement, html, css } from "lit";
 import { customElement, property, state } from "lit/decorators.js";
 
 interface ProviderKeyInfo {
 	provider: string;
 	hasKey: boolean;
+	config: Record<string, unknown>;
 	updatedAt: string;
 }
 
@@ -30,6 +32,7 @@ const PROVIDER_LABELS: Record<string, string> = {
 	huggingface: "Hugging Face",
 	opencode: "OpenCode",
 	"kimi-coding": "Kimi Coding",
+	"azure-openai": "Azure OpenAI",
 };
 
 @customElement("provider-keys-panel")
@@ -80,6 +83,7 @@ export class ProviderKeysPanel extends LitElement {
 			display: flex;
 			gap: 0.5rem;
 			align-items: flex-end;
+			flex-wrap: wrap;
 		}
 		.form-field {
 			display: flex;
@@ -173,23 +177,21 @@ export class ProviderKeysPanel extends LitElement {
 	@state()
 	private apiKeyInput = "";
 
+	@state()
+	private azureBaseUrl = "";
+
+	@state()
+	private azureApiVersion = "";
+
+	@state()
+	private azureDeploymentNameMap = "";
+
 	override connectedCallback() {
 		super.connectedCallback();
 		this.loadKeys();
 	}
 
-	private async fetchApi(url: string, options: RequestInit = {}): Promise<any> {
-		const token = this.getToken?.();
-		const res = await fetch(url, {
-			...options,
-			headers: {
-				"Content-Type": "application/json",
-				...(token ? { Authorization: `Bearer ${token}` } : {}),
-				...options.headers,
-			},
-		});
-		return res.json();
-	}
+	private fetchApi = (url: string, options?: RequestInit) => apiFetch(url, options, this.getToken);
 
 	private async loadKeys() {
 		this.loading = true;
@@ -207,16 +209,26 @@ export class ProviderKeysPanel extends LitElement {
 
 	private async handleAdd() {
 		if (!this.selectedProvider || !this.apiKeyInput) return;
+		if (this.selectedProvider === "azure-openai" && !this.azureBaseUrl) return;
 
 		this.saving = true;
 		this.statusMessage = "";
 		try {
+			const body: Record<string, unknown> = {
+				provider: this.selectedProvider,
+				apiKey: this.apiKeyInput,
+			};
+
+			if (this.selectedProvider === "azure-openai") {
+				const config: Record<string, string> = { baseUrl: this.azureBaseUrl };
+				if (this.azureApiVersion) config.apiVersion = this.azureApiVersion;
+				if (this.azureDeploymentNameMap) config.deploymentNameMap = this.azureDeploymentNameMap;
+				body.config = config;
+			}
+
 			const result = await this.fetchApi("/api/provider-keys", {
 				method: "POST",
-				body: JSON.stringify({
-					provider: this.selectedProvider,
-					apiKey: this.apiKeyInput,
-				}),
+				body: JSON.stringify(body),
 			});
 
 			if (result.success) {
@@ -224,6 +236,9 @@ export class ProviderKeysPanel extends LitElement {
 				this.statusType = "success";
 				this.apiKeyInput = "";
 				this.selectedProvider = "";
+				this.azureBaseUrl = "";
+				this.azureApiVersion = "";
+				this.azureDeploymentNameMap = "";
 				await this.loadKeys();
 			} else {
 				this.statusMessage = result.error || "Failed to save key";
@@ -283,6 +298,7 @@ export class ProviderKeysPanel extends LitElement {
 									<div class="key-item">
 										<div class="key-info">
 											<span class="key-provider">${PROVIDER_LABELS[key.provider] || key.provider}</span>
+											${key.config?.baseUrl ? html`<span class="key-date">${key.config.baseUrl}</span>` : null}
 											<span class="key-date">Updated ${new Date(key.updatedAt).toLocaleDateString()}</span>
 										</div>
 										<button class="btn-danger" @click=${() => this.handleDelete(key.provider)}>Remove</button>
@@ -296,7 +312,12 @@ export class ProviderKeysPanel extends LitElement {
 				<div class="form-row">
 					<div class="form-field">
 						<label>Provider</label>
-						<select .value=${this.selectedProvider} @change=${(e: Event) => (this.selectedProvider = (e.target as HTMLSelectElement).value)}>
+						<select .value=${this.selectedProvider} @change=${(e: Event) => {
+							this.selectedProvider = (e.target as HTMLSelectElement).value;
+							this.azureBaseUrl = "";
+							this.azureApiVersion = "";
+							this.azureDeploymentNameMap = "";
+						}}>
 							<option value="">Select provider...</option>
 							${this.availableProviders.map(
 								(p) => html`<option value=${p}>${PROVIDER_LABELS[p] || p}</option>`,
@@ -314,12 +335,43 @@ export class ProviderKeysPanel extends LitElement {
 					</div>
 					<button
 						class="btn-primary"
-						?disabled=${!this.selectedProvider || !this.apiKeyInput || this.saving}
+						?disabled=${!this.selectedProvider || !this.apiKeyInput || (this.selectedProvider === "azure-openai" && !this.azureBaseUrl) || this.saving}
 						@click=${this.handleAdd}
 					>
 						${this.saving ? "Saving..." : "Add Key"}
 					</button>
 				</div>
+				${this.selectedProvider === "azure-openai" ? html`
+					<div class="form-row">
+						<div class="form-field">
+							<label>Endpoint URL *</label>
+							<input
+								type="url"
+								placeholder="https://your-resource.openai.azure.com"
+								.value=${this.azureBaseUrl}
+								@input=${(e: Event) => (this.azureBaseUrl = (e.target as HTMLInputElement).value)}
+							/>
+						</div>
+						<div class="form-field">
+							<label>API Version</label>
+							<input
+								type="text"
+								placeholder="2024-02-15-preview"
+								.value=${this.azureApiVersion}
+								@input=${(e: Event) => (this.azureApiVersion = (e.target as HTMLInputElement).value)}
+							/>
+						</div>
+						<div class="form-field">
+							<label>Deployment Name Map</label>
+							<input
+								type="text"
+								placeholder="gpt-4o=my-gpt4o-deployment"
+								.value=${this.azureDeploymentNameMap}
+								@input=${(e: Event) => (this.azureDeploymentNameMap = (e.target as HTMLInputElement).value)}
+							/>
+						</div>
+					</div>
+				` : null}
 			</div>
 		`;
 	}

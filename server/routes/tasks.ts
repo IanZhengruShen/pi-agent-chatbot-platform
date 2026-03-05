@@ -198,7 +198,13 @@ export function createTasksRouter(
 		const offset = parseInt(req.query.offset as string) || 0;
 		const statusFilter = req.query.status as string | undefined;
 
-		let query = `SELECT * FROM tasks WHERE user_id = $1`;
+		// Select explicit columns excluding 'output' (can be MB-sized) for list view.
+		// Use COUNT(*) OVER() window function to get total count in a single query.
+		let query = `SELECT id, user_id, team_id, status, prompt, model_id, provider,
+			skill_ids, file_ids, delivery, progress, error, usage,
+			created_at, started_at, completed_at,
+			COUNT(*) OVER() AS total_count
+			FROM tasks WHERE user_id = $1`;
 		const params: any[] = [req.user!.userId];
 
 		if (statusFilter) {
@@ -210,23 +216,15 @@ export function createTasksRouter(
 		query += ` ORDER BY created_at DESC LIMIT $${params.length + 1} OFFSET $${params.length + 2}`;
 		params.push(limit, offset);
 
-		const result = await db.query<TaskRow>(query, params);
+		const result = await db.query<TaskRow & { total_count: string }>(query, params);
 
-		// Count total
-		let countQuery = `SELECT COUNT(*) FROM tasks WHERE user_id = $1`;
-		const countParams: any[] = [req.user!.userId];
-		if (statusFilter) {
-			const statuses = statusFilter.split(",").map((s) => s.trim());
-			countParams.push(statuses);
-			countQuery += ` AND status = ANY($${countParams.length})`;
-		}
-		const countResult = await db.query<{ count: string }>(countQuery, countParams);
+		const total = result.rows.length > 0 ? parseInt(result.rows[0].total_count) : 0;
 
 		res.json({
 			success: true,
 			data: {
 				tasks: result.rows,
-				total: parseInt(countResult.rows[0].count),
+				total,
 				limit,
 				offset,
 			},

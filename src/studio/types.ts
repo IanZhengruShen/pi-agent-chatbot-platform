@@ -26,6 +26,7 @@ export interface SkillInfo {
 	name: string;
 	scope: string;
 	description: string;
+	created_at: string;
 }
 
 export interface ProfileFormData {

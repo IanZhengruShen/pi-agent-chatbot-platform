@@ -21,7 +21,7 @@ import { createDatabase } from "./db/index.js";
 import { runMigrations } from "./db/migrate.js";
 import { apiRateLimit, authRateLimit } from "./middleware/rate-limit.js";
 import authRouter from "./routes/auth.js";
-import sessionsRouter from "./routes/sessions.js";
+import { createSessionsRouter } from "./routes/sessions.js";
 import settingsRouter from "./routes/settings.js";
 import importRouter from "./routes/import.js";
 import { createProviderKeysRouter } from "./routes/provider-keys.js";
@@ -32,6 +32,7 @@ import { createJobsRouter } from "./routes/jobs.js";
 import { createTasksRouter } from "./routes/tasks.js";
 import { createAgentProfilesRouter } from "./routes/agent-profiles.js";
 import { createMemoryRouter } from "./routes/memory.js";
+import { createTeamMembersRouter } from "./routes/team-members.js";
 import { requireAuth } from "./auth/middleware.js";
 import { createCryptoService } from "./services/crypto.js";
 import { ProcessPool } from "./services/process-pool.js";
@@ -39,6 +40,8 @@ import { createStorageService } from "./services/storage.js";
 import { AgentExecutor } from "./services/agent-executor.js";
 import { ArtifactCollector } from "./services/artifact-collector.js";
 import { TaskQueueService } from "./services/task-queue.js";
+import { SessionStatusService } from "./services/session-status-service.js";
+import { OutputBufferService } from "./services/output-buffer.js";
 import { TenantBridge, type TenantBridgeOptions } from "./agent-service.js";
 import type { BridgeOptions } from "./ws-bridge.js";
 import type { AgentProfileRow } from "./db/types.js";
@@ -60,6 +63,17 @@ async function main() {
 	const artifactCollector = new ArtifactCollector(db, storageService);
 	const taskQueueService = new TaskQueueService(db, storageService, agentExecutor, artifactCollector);
 	await taskQueueService.start();
+	const sessionStatusService = new SessionStatusService();
+	const outputBufferService = new OutputBufferService(db);
+
+	// Wire process-stopped events to session status service
+	processPool.on("process-stopped", (sessionId: string, reason: string) => {
+		if (reason === "crash" || reason === "shutdown") {
+			sessionStatusService.setStatus(sessionId, "dead", db);
+		} else if (reason === "idle") {
+			sessionStatusService.setStatus(sessionId, "suspended", db);
+		}
+	});
 
 	const app = express();
 
@@ -77,17 +91,27 @@ async function main() {
 	}
 
 	// 1.1 Security headers (helmet)
+	// CDN domains allowed for HTML artifact rendering (interactive plots, etc.)
+	// Security note: artifacts run inside sandboxed iframes (allow-scripts only,
+	// NO allow-same-origin) so scripts cannot access the parent page context.
+	const trustedCDNs = [
+		"https://cdn.plot.ly",
+		"https://cdn.jsdelivr.net",
+		"https://cdnjs.cloudflare.com",
+		"https://unpkg.com",
+		"https://d3js.org",
+	];
 	app.use(
 		helmet({
 			contentSecurityPolicy: {
 				directives: {
 					defaultSrc: ["'self'"],
-					scriptSrc: ["'self'", ...(isDev ? ["'unsafe-eval'", "'unsafe-inline'"] : [])],
-					styleSrc: ["'self'", "'unsafe-inline'"],
-					imgSrc: ["'self'", "data:", "blob:"],
-					connectSrc: ["'self'", "ws:", "wss:"],
+					scriptSrc: ["'self'", "'unsafe-inline'", ...trustedCDNs, ...(isDev ? ["'unsafe-eval'"] : [])],
+					styleSrc: ["'self'", "'unsafe-inline'", ...trustedCDNs],
+					imgSrc: ["'self'", "data:", "blob:", "https:"],
+					connectSrc: ["'self'", "ws:", "wss:", ...trustedCDNs],
 					workerSrc: ["'self'", "blob:"],
-					fontSrc: ["'self'"],
+					fontSrc: ["'self'", ...trustedCDNs],
 					objectSrc: ["'none'"],
 					frameAncestors: ["'none'"],
 					...(isDev ? { scriptSrcAttr: ["'unsafe-inline'"] } : {}),
@@ -142,7 +166,7 @@ async function main() {
 
 	// --- API Routes ---
 	app.use("/api/auth", authRateLimit, authRouter);
-	app.use("/api/sessions", requireAuth, apiRateLimit, sessionsRouter);
+	app.use("/api/sessions", apiRateLimit, createSessionsRouter(sessionStatusService, processPool));
 	app.use("/api/settings", requireAuth, apiRateLimit, settingsRouter);
 	app.use("/api/import", requireAuth, apiRateLimit, importRouter);
 	app.use("/api/provider-keys", apiRateLimit, createProviderKeysRouter(crypto));
@@ -153,6 +177,7 @@ async function main() {
 	app.use("/api/tasks", apiRateLimit, createTasksRouter(storageService, crypto, taskQueueService));
 	app.use("/api/agent-profiles", apiRateLimit, createAgentProfilesRouter(agentExecutor));
 	app.use("/api/memory", apiRateLimit, createMemoryRouter());
+	app.use("/api/team-members", apiRateLimit, createTeamMembersRouter());
 
 	// Read files from the agent's working directory (for rendering artifacts)
 	app.get("/api/agent-files", requireAuth, apiRateLimit, async (req, res) => {
@@ -190,6 +215,25 @@ async function main() {
 			}
 		}
 		try {
+			// PPTX: convert to slide images server-side via LibreOffice
+			if (ext === "pptx" || ext === "ppt") {
+				try {
+					const { convertPptxToSlideImages } = await import("./services/pptx-converter.js");
+					const [slides, rawBuffer] = await Promise.all([
+						convertPptxToSlideImages(filePath),
+						fs.readFile(filePath),
+					]);
+					res.json({ slides, raw: rawBuffer.toString("base64"), encoding: "slides" });
+					return;
+				} catch (convErr: any) {
+					// LibreOffice/pdftoppm not installed — fall back to raw base64
+					console.warn("[agent-files] PPTX conversion failed, serving raw binary:", convErr.message);
+					const buffer = await fs.readFile(filePath);
+					res.json({ content: buffer.toString("base64"), encoding: "base64" });
+					return;
+				}
+			}
+
 			const isBinary = BINARY_EXTENSIONS.has(ext);
 			if (isBinary) {
 				const buffer = await fs.readFile(filePath);
@@ -199,7 +243,8 @@ async function main() {
 				const content = await fs.readFile(filePath, "utf-8");
 				res.json({ content, encoding: "text" });
 			}
-		} catch {
+		} catch (err: any) {
+			console.error("[agent-files] Error serving file:", err.message);
 			res.status(404).json({ error: "File not found" });
 		}
 	});
@@ -239,7 +284,23 @@ async function main() {
 		if (url.searchParams.has("provider")) options.provider = url.searchParams.get("provider")!;
 		if (url.searchParams.has("model")) options.model = url.searchParams.get("model")!;
 
-		const sessionId = url.searchParams.get("sessionId") || undefined;
+		let sessionId = url.searchParams.get("sessionId") || undefined;
+
+		// Validate session ownership before allowing reconnection
+		if (sessionId) {
+			const sessionResult = await db.query<{ user_id: string }>(
+				"SELECT user_id FROM sessions WHERE id = $1 AND deleted_at IS NULL",
+				[sessionId],
+			);
+			if (sessionResult.rows.length === 0) {
+				// Session doesn't exist — let it proceed as a new session
+				sessionId = undefined;
+			} else if (sessionResult.rows[0].user_id !== user.userId) {
+				console.warn(`[server] User ${user.userId} attempted to access session ${sessionId} owned by ${sessionResult.rows[0].user_id}`);
+				ws.close(4003, "Session not owned by authenticated user");
+				return;
+			}
+		}
 
 		// Track CWD for agent-files endpoint
 		if (options.cwd) {
@@ -301,6 +362,8 @@ async function main() {
 			crypto,
 			db,
 			storage: storageService,
+			sessionStatusService,
+			outputBufferService,
 			profileSkillIds,
 			profileFileIds,
 			agentProfileId,
@@ -374,7 +437,7 @@ async function main() {
 		app.use(express.static(distPath));
 
 		// SPA fallback — but not for /api/* routes
-		app.get("*", (_req, res) => {
+		app.get("/{*path}", (_req, res) => {
 			res.sendFile(path.join(distPath, "index.html"));
 		});
 

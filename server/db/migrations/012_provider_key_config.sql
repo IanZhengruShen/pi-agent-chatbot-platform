@@ -1,0 +1,1 @@
+ALTER TABLE provider_keys ADD COLUMN config JSONB NOT NULL DEFAULT '{}';

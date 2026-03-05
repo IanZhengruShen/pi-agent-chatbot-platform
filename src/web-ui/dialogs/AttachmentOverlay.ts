@@ -1,12 +1,10 @@
 import "@mariozechner/mini-lit/dist/ModeToggle.js";
 import { icon } from "@mariozechner/mini-lit";
 import { Button } from "@mariozechner/mini-lit/dist/Button.js";
-import { renderAsync } from "docx-preview";
 import { html, LitElement } from "lit";
 import { state } from "lit/decorators.js";
 import { Download, X } from "lucide";
-import * as pdfjsLib from "pdfjs-dist";
-import * as XLSX from "xlsx";
+import { getDocxPreview, getJSZip, getPdfjs, getXlsx } from "../utils/lazy-imports.js";
 import type { Attachment } from "../utils/attachment-utils.js";
 import { i18n } from "../utils/i18n.js";
 
@@ -172,7 +170,7 @@ export class AttachmentOverlay extends LitElement {
 
 		const fileType = this.getFileType();
 		const hasExtractedText = !!this.attachment.extractedText;
-		const showToggle = fileType !== "image" && fileType !== "text" && fileType !== "pptx" && hasExtractedText;
+		const showToggle = fileType !== "image" && fileType !== "text" && hasExtractedText;
 
 		if (!showToggle) return html``;
 
@@ -294,7 +292,7 @@ export class AttachmentOverlay extends LitElement {
 					await this.renderExcel();
 					break;
 				case "pptx":
-					await this.renderExtractedText();
+					await this.renderPptx();
 					break;
 			}
 		}
@@ -316,6 +314,7 @@ export class AttachmentOverlay extends LitElement {
 			}
 
 			// Load the PDF
+			const pdfjsLib = await getPdfjs();
 			this.currentLoadingTask = pdfjsLib.getDocument({ data: arrayBuffer });
 			pdf = await this.currentLoadingTask.promise;
 			this.currentLoadingTask = null;
@@ -397,6 +396,7 @@ export class AttachmentOverlay extends LitElement {
 			container.appendChild(wrapper);
 
 			// Render the DOCX file into the wrapper
+			const { renderAsync } = await getDocxPreview();
 			await renderAsync(arrayBuffer, wrapper as HTMLElement, undefined, {
 				className: "docx",
 				inWrapper: true,
@@ -490,6 +490,7 @@ export class AttachmentOverlay extends LitElement {
 			const arrayBuffer = this.base64ToArrayBuffer(this.attachment.content);
 
 			// Read the workbook
+			const XLSX = await getXlsx();
 			const workbook = XLSX.read(arrayBuffer, { type: "array" });
 
 			// Clear container
@@ -518,7 +519,7 @@ export class AttachmentOverlay extends LitElement {
 					const sheetDiv = document.createElement("div");
 					sheetDiv.style.display = index === 0 ? "flex" : "none";
 					sheetDiv.className = "flex-1 overflow-auto";
-					sheetDiv.appendChild(this.renderExcelSheet(workbook.Sheets[sheetName], sheetName));
+					sheetDiv.appendChild(this.renderExcelSheet(XLSX, workbook.Sheets[sheetName], sheetName));
 					sheetContents.push(sheetDiv);
 
 					// Tab click handler
@@ -548,7 +549,7 @@ export class AttachmentOverlay extends LitElement {
 			} else {
 				// Single sheet
 				const sheetName = workbook.SheetNames[0];
-				wrapper.appendChild(this.renderExcelSheet(workbook.Sheets[sheetName], sheetName));
+				wrapper.appendChild(this.renderExcelSheet(XLSX, workbook.Sheets[sheetName], sheetName));
 			}
 		} catch (error: any) {
 			console.error("Error rendering Excel:", error);
@@ -556,7 +557,7 @@ export class AttachmentOverlay extends LitElement {
 		}
 	}
 
-	private renderExcelSheet(worksheet: any, sheetName: string): HTMLElement {
+	private renderExcelSheet(XLSX: any, worksheet: any, sheetName: string): HTMLElement {
 		const sheetDiv = document.createElement("div");
 
 		// Generate HTML table
@@ -606,27 +607,185 @@ export class AttachmentOverlay extends LitElement {
 		return bytes.buffer;
 	}
 
-	private async renderExtractedText() {
+	private pptxSlides: { texts: string[]; imageBlobs: string[] }[] = [];
+	private pptxCurrentSlide = 0;
+
+	private async renderPptx() {
 		const container = this.querySelector("#pptx-container");
 		if (!container || !this.attachment) return;
 
 		try {
-			// Display the extracted text content
-			container.innerHTML = "";
-			const wrapper = document.createElement("div");
-			wrapper.className = "p-6 overflow-auto";
+			const arrayBuffer = this.base64ToArrayBuffer(this.attachment.content);
+			const JSZip = await getJSZip();
+			const zip = await JSZip.loadAsync(arrayBuffer);
 
-			// Create a pre element to preserve formatting
-			const pre = document.createElement("pre");
-			pre.className = "whitespace-pre-wrap text-sm text-foreground font-mono";
-			pre.textContent = this.attachment.extractedText || i18n("No text content available");
+			// Find and sort slide XML files
+			const slideFiles: string[] = [];
+			zip.forEach((p: string) => {
+				if (/^ppt\/slides\/slide\d+\.xml$/.test(p)) slideFiles.push(p);
+			});
+			slideFiles.sort((a, b) => {
+				return parseInt(a.match(/slide(\d+)/)?.[1] || "0") - parseInt(b.match(/slide(\d+)/)?.[1] || "0");
+			});
 
-			wrapper.appendChild(pre);
-			container.appendChild(wrapper);
+			const imageMime: Record<string, string> = {
+				jpg: "image/jpeg",
+				jpeg: "image/jpeg",
+				png: "image/png",
+				gif: "image/gif",
+				webp: "image/webp",
+				bmp: "image/bmp",
+			};
+
+			const slides: { texts: string[]; imageBlobs: string[] }[] = [];
+			for (const slideFile of slideFiles) {
+				const slideXml = await zip.file(slideFile)?.async("text");
+				if (!slideXml) continue;
+
+				// Extract text grouped by paragraph
+				const texts: string[] = [];
+				for (const paragraph of slideXml.split("</a:p>")) {
+					const runs = [...paragraph.matchAll(/<a:t[^>]*>([\s\S]*?)<\/a:t>/g)];
+					const text = runs.map((m) => m[1]).join("").trim();
+					if (text) texts.push(text);
+				}
+
+				// Load embedded images from slide relationships
+				const imageBlobs: string[] = [];
+				const slideNum = slideFile.match(/slide(\d+)/)?.[1];
+				const relsXml = await zip.file(`ppt/slides/_rels/slide${slideNum}.xml.rels`)?.async("text");
+				if (relsXml) {
+					for (const m of relsXml.matchAll(/Target="([^"]*\.(png|jpg|jpeg|gif|bmp|webp))"/gi)) {
+						let imagePath = m[1];
+						if (imagePath.startsWith("../")) imagePath = "ppt/" + imagePath.replace("../", "");
+						else if (!imagePath.startsWith("ppt/")) imagePath = "ppt/slides/" + imagePath;
+
+						const imageFile = zip.file(imagePath);
+						if (imageFile) {
+							const data = await imageFile.async("base64");
+							const mime = imageMime[m[2].toLowerCase()] || "image/png";
+							imageBlobs.push(`data:${mime};base64,${data}`);
+						}
+					}
+				}
+
+				slides.push({ texts, imageBlobs });
+			}
+
+			this.pptxSlides = slides;
+			this.pptxCurrentSlide = 0;
+
+			if (slides.length === 0) {
+				this.error = i18n("No slides found in the presentation");
+				return;
+			}
+
+			this.renderPptxSlide(container);
 		} catch (error: any) {
-			console.error("Error rendering extracted text:", error);
-			this.error = error?.message || i18n("Failed to display text content");
+			console.error("Error rendering PPTX:", error);
+			this.error = error?.message || i18n("Failed to load presentation");
 		}
+	}
+
+	private renderPptxSlide(container: Element) {
+		const slide = this.pptxSlides[this.pptxCurrentSlide];
+		if (!slide) return;
+
+		container.innerHTML = "";
+
+		const wrapper = document.createElement("div");
+		wrapper.className = "h-full flex flex-col overflow-hidden";
+
+		// Slide content area
+		const slideArea = document.createElement("div");
+		slideArea.className = "flex-1 overflow-auto flex items-center justify-center p-4";
+
+		const slideCard = document.createElement("div");
+		slideCard.className = "w-full bg-white text-black rounded-lg shadow-lg overflow-hidden";
+		slideCard.style.maxWidth = "960px";
+		slideCard.style.aspectRatio = "16/9";
+
+		const slideInner = document.createElement("div");
+		slideInner.className = "w-full h-full flex flex-col justify-center p-8 overflow-auto";
+
+		// Render images
+		if (slide.imageBlobs.length > 0) {
+			const imgContainer = document.createElement("div");
+			imgContainer.className = "flex flex-wrap gap-2 justify-center mb-4";
+			for (const src of slide.imageBlobs) {
+				const img = document.createElement("img");
+				img.src = src;
+				img.className = "max-h-48 max-w-full object-contain rounded";
+				imgContainer.appendChild(img);
+			}
+			slideInner.appendChild(imgContainer);
+		}
+
+		// Render text
+		slide.texts.forEach((text, idx) => {
+			const div = document.createElement("div");
+			if (idx === 0 && slide.texts.length > 1) {
+				div.className = "text-2xl font-bold mb-4 text-center";
+			} else if (idx === 0) {
+				div.className = "text-xl font-semibold text-center mb-2";
+			} else {
+				div.className = "text-base mb-2";
+			}
+			div.textContent = text;
+			slideInner.appendChild(div);
+		});
+
+		if (slide.texts.length === 0 && slide.imageBlobs.length === 0) {
+			const empty = document.createElement("div");
+			empty.className = "text-gray-400 text-center italic";
+			empty.textContent = i18n("Empty slide");
+			slideInner.appendChild(empty);
+		}
+
+		slideCard.appendChild(slideInner);
+		slideArea.appendChild(slideCard);
+		wrapper.appendChild(slideArea);
+
+		// Navigation bar
+		if (this.pptxSlides.length > 1) {
+			const nav = document.createElement("div");
+			nav.className = "flex items-center justify-center gap-3 py-3 border-t border-border bg-card";
+
+			const prevBtn = document.createElement("button");
+			prevBtn.textContent = i18n("Prev");
+			prevBtn.className =
+				"px-3 py-1.5 text-sm rounded-md border border-border hover:bg-muted transition-colors disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer";
+			prevBtn.disabled = this.pptxCurrentSlide === 0;
+			prevBtn.onclick = () => {
+				if (this.pptxCurrentSlide > 0) {
+					this.pptxCurrentSlide--;
+					this.renderPptxSlide(container);
+				}
+			};
+
+			const counter = document.createElement("span");
+			counter.className = "text-sm text-muted-foreground";
+			counter.textContent = `${i18n("Slide")} ${this.pptxCurrentSlide + 1} / ${this.pptxSlides.length}`;
+
+			const nextBtn = document.createElement("button");
+			nextBtn.textContent = i18n("Next");
+			nextBtn.className =
+				"px-3 py-1.5 text-sm rounded-md border border-border hover:bg-muted transition-colors disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer";
+			nextBtn.disabled = this.pptxCurrentSlide === this.pptxSlides.length - 1;
+			nextBtn.onclick = () => {
+				if (this.pptxCurrentSlide < this.pptxSlides.length - 1) {
+					this.pptxCurrentSlide++;
+					this.renderPptxSlide(container);
+				}
+			};
+
+			nav.appendChild(prevBtn);
+			nav.appendChild(counter);
+			nav.appendChild(nextBtn);
+			wrapper.appendChild(nav);
+		}
+
+		container.appendChild(wrapper);
 	}
 }
 

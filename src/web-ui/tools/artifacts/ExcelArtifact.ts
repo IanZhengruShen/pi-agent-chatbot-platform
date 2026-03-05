@@ -1,7 +1,7 @@
 import { DownloadButton } from "@mariozechner/mini-lit/dist/DownloadButton.js";
 import { html, type TemplateResult } from "lit";
 import { customElement, property, state } from "lit/decorators.js";
-import * as XLSX from "xlsx";
+import { getXlsx } from "../../utils/lazy-imports.js";
 import { i18n } from "../../utils/i18n.js";
 import { ArtifactElement } from "./ArtifactElement.js";
 
@@ -97,6 +97,7 @@ export class ExcelArtifact extends ArtifactElement {
 		if (!container || !this._content) return;
 
 		try {
+			const XLSX = await getXlsx();
 			const arrayBuffer = this.base64ToArrayBuffer(this._content);
 			const workbook = XLSX.read(arrayBuffer, { type: "array" });
 
@@ -125,7 +126,7 @@ export class ExcelArtifact extends ArtifactElement {
 					const sheetDiv = document.createElement("div");
 					sheetDiv.style.display = index === 0 ? "flex" : "none";
 					sheetDiv.className = "flex-1 overflow-auto";
-					sheetDiv.appendChild(this.renderExcelSheet(workbook.Sheets[sheetName], sheetName));
+					sheetDiv.appendChild(this.renderExcelSheet(XLSX, workbook.Sheets[sheetName], sheetName));
 					sheetContents.push(sheetDiv);
 
 					// Tab click handler
@@ -155,7 +156,7 @@ export class ExcelArtifact extends ArtifactElement {
 			} else {
 				// Single sheet
 				const sheetName = workbook.SheetNames[0];
-				wrapper.appendChild(this.renderExcelSheet(workbook.Sheets[sheetName], sheetName));
+				wrapper.appendChild(this.renderExcelSheet(XLSX, workbook.Sheets[sheetName], sheetName));
 			}
 		} catch (error: any) {
 			console.error("Error rendering Excel:", error);
@@ -163,7 +164,7 @@ export class ExcelArtifact extends ArtifactElement {
 		}
 	}
 
-	private renderExcelSheet(worksheet: any, sheetName: string): HTMLElement {
+	private renderExcelSheet(XLSX: any, worksheet: any, sheetName: string): HTMLElement {
 		const sheetDiv = document.createElement("div");
 
 		// Generate HTML table

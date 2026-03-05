@@ -23,6 +23,10 @@ export class ApiStorageBackend implements StorageBackend {
 	/** Tracks sessions currently being created (POST in-flight). */
 	private pendingCreations = new Map<string, Promise<void>>();
 
+	/** LRU tracking for session data cache. Most recent ID is last. */
+	private sessionAccessOrder: string[] = [];
+	private static readonly MAX_CACHED_SESSIONS = 50;
+
 	/**
 	 * Tracks the number of messages the server knows about per session,
 	 * so we can compute which messages are "new" during a set() call.
@@ -116,6 +120,23 @@ export class ApiStorageBackend implements StorageBackend {
 		return store;
 	}
 
+	/** Move session to most-recently-used position and evict oldest if over limit. */
+	private touchSession(key: string): void {
+		const idx = this.sessionAccessOrder.indexOf(key);
+		if (idx !== -1) this.sessionAccessOrder.splice(idx, 1);
+		this.sessionAccessOrder.push(key);
+
+		// Evict LRU sessions beyond the cap
+		const sessionsStore = this.cache.get("sessions");
+		while (
+			this.sessionAccessOrder.length > ApiStorageBackend.MAX_CACHED_SESSIONS &&
+			sessionsStore
+		) {
+			const evictId = this.sessionAccessOrder.shift()!;
+			sessionsStore.delete(evictId);
+		}
+	}
+
 	private async apiFetch(path: string, options?: RequestInit): Promise<any> {
 		const token = this.getToken();
 		const headers: Record<string, string> = {
@@ -185,7 +206,10 @@ export class ApiStorageBackend implements StorageBackend {
 		// For full session data, fetch from server if not already cached
 		if (storeName === "sessions") {
 			const store = this.getStore("sessions");
-			if (store.has(key)) return store.get(key) as T;
+			if (store.has(key)) {
+				this.touchSession(key);
+				return store.get(key) as T;
+			}
 
 			try {
 				const [sessionRes, messagesRes] = await Promise.all([
@@ -212,11 +236,13 @@ export class ApiStorageBackend implements StorageBackend {
 					messages,
 					lastModified: session.last_modified,
 					messageCount: session.message_count,
+					artifactsCache: session.artifacts_cache ?? {},
 				};
 
 				store.set(key, sessionData);
 				this.knownServerSessions.add(key);
 				this.serverMessageCounts.set(key, messages.length);
+				this.touchSession(key);
 
 				return sessionData as T;
 			} catch {
@@ -242,6 +268,7 @@ export class ApiStorageBackend implements StorageBackend {
 		if (storeName === "sessions") {
 			const data = value as any;
 			store.set(key, data);
+			this.touchSession(key);
 
 			// Also update metadata cache
 			const metadataCache = this.getStore("sessions-metadata");
@@ -315,6 +342,9 @@ export class ApiStorageBackend implements StorageBackend {
 							thinkingLevel: data.thinkingLevel,
 							modelId: data.modelId,
 							provider: data.provider,
+							...(data.artifactsCache && Object.keys(data.artifactsCache).length > 0
+								? { artifactsCache: data.artifactsCache }
+								: {}),
 						}),
 					}).catch((err) => {
 						if (err.message?.includes("404")) {

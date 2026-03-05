@@ -8,6 +8,7 @@
  * ProfileCard and ProfileEditor sub-components.
  */
 
+import { apiFetch } from "../shared/api.js";
 import { LitElement, html, css, nothing } from "lit";
 import { customElement, property, state } from "lit/decorators.js";
 import type { ProfileInfo, SkillInfo, ProfileFormData } from "../studio/types.js";
@@ -100,18 +101,7 @@ export class AgentProfilesPanel extends LitElement {
 		this.loadSkills();
 	}
 
-	private async fetchApi(url: string, options: RequestInit = {}): Promise<any> {
-		const token = this.getToken?.();
-		const res = await fetch(url, {
-			...options,
-			headers: {
-				"Content-Type": "application/json",
-				...(token ? { Authorization: `Bearer ${token}` } : {}),
-				...options.headers,
-			},
-		});
-		return res.json();
-	}
+	private fetchApi = (url: string, options?: RequestInit) => apiFetch(url, options, this.getToken);
 
 	private async loadProfiles() {
 		this.loading = true;

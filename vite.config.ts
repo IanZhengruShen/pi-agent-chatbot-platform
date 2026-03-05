@@ -60,4 +60,19 @@ const alias = sorted.flatMap((mod) => {
 export default defineConfig({
 	plugins: [tailwindcss()],
 	resolve: { alias },
+	build: {
+		rollupOptions: {
+			output: {
+				manualChunks: {
+					"vendor-pdf": ["pdfjs-dist"],
+					"vendor-excel": ["xlsx"],
+					"vendor-docx": ["docx-preview"],
+					"vendor-hljs": ["highlight.js/lib/core"],
+				},
+			},
+		},
+	},
+	optimizeDeps: {
+		include: ["lit", "lucide", "@mariozechner/pi-agent-core", "@mariozechner/pi-ai"],
+	},
 });

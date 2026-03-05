@@ -50,7 +50,7 @@ export class StreamingMessageContainer extends LitElement {
 				if (!this._immediateUpdate && this._pendingMessage !== null) {
 					// Deep clone the message to ensure Lit detects changes in nested properties
 					// (like toolCall.arguments being mutated during streaming)
-					this._message = JSON.parse(JSON.stringify(this._pendingMessage));
+					this._message = structuredClone(this._pendingMessage);
 					this.requestUpdate();
 				}
 				// Reset for next batch

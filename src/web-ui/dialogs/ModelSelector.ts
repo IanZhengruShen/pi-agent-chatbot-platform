@@ -156,15 +156,45 @@ export class ModelSelector extends DialogBase {
 		}
 	}
 
+	/**
+	 * Providers visible in the model selector.
+	 * Only these cloud providers are shown; custom providers (Ollama, etc.) are always included.
+	 */
+	private static ALLOWED_PROVIDERS = new Set(["anthropic", "azure-openai-responses", "amazon-bedrock"]);
+
+	/**
+	 * For providers with many models, only show models matching these prefixes.
+	 * If a provider is not in this map, all its models are shown.
+	 */
+	private static PROVIDER_MODEL_FILTERS: Record<string, (id: string) => boolean> = {
+		"amazon-bedrock": (id) => id.startsWith("anthropic.claude"),
+	};
+
+	/**
+	 * Bedrock cross-region inference profile prefix.
+	 * EU/AP regions require model IDs prefixed with "eu." or "ap.".
+	 * Set to empty string for US regions (bare model IDs work).
+	 */
+	private static BEDROCK_REGION_PREFIX = "eu.";
+
 	private getFilteredModels(): Array<{ provider: string; id: string; model: any }> {
-		// Collect all models from known providers
+		// Collect models from allowed known providers only
 		const allModels: Array<{ provider: string; id: string; model: any }> = [];
 		const knownProviders = getProviders();
 
 		for (const provider of knownProviders) {
+			if (!ModelSelector.ALLOWED_PROVIDERS.has(provider)) continue;
+			const modelFilter = ModelSelector.PROVIDER_MODEL_FILTERS[provider];
 			const models = getModels(provider as any);
 			for (const model of models) {
-				allModels.push({ provider, id: model.id, model });
+				if (modelFilter && !modelFilter(model.id)) continue;
+				// Bedrock non-US regions need cross-region inference profile IDs
+				if (provider === "amazon-bedrock" && ModelSelector.BEDROCK_REGION_PREFIX) {
+					const prefixedId = ModelSelector.BEDROCK_REGION_PREFIX + model.id;
+					allModels.push({ provider, id: prefixedId, model: { ...model, id: prefixedId } });
+				} else {
+					allModels.push({ provider, id: model.id, model });
+				}
 			}
 		}
 

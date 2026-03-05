@@ -16,6 +16,9 @@ export class MessageList extends LitElement {
 	@property({ type: Boolean }) hideIntermediateResults: boolean = false;
 	@property({ attribute: false }) onCostClick?: () => void;
 
+	private _prevMessages: AgentMessage[] | null = null;
+	private _cachedItems: Array<{ key: string; template: TemplateResult }> = [];
+
 	protected override createRenderRoot(): HTMLElement | DocumentFragment {
 		return this;
 	}
@@ -26,6 +29,9 @@ export class MessageList extends LitElement {
 	}
 
 	private buildRenderItems() {
+		// Memoize: only rebuild when the messages array reference changes
+		if (this.messages === this._prevMessages) return this._cachedItems;
+		this._prevMessages = this.messages;
 		// Map tool results by call id for quick lookup
 		const resultByCallId = new Map<string, ToolResultMessageType>();
 		for (const message of this.messages) {
@@ -79,6 +85,7 @@ export class MessageList extends LitElement {
 				// Skip unknown roles
 			}
 		}
+		this._cachedItems = items;
 		return items;
 	}
 
