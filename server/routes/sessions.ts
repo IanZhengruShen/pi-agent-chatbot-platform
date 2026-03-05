@@ -185,26 +185,38 @@ export function createSessionsRouter(
 		if (!session) return;
 
 		const db = getDatabase();
-		const { title, modelId, provider, thinkingLevel, artifactsCache } = req.body;
+		const { title, modelId, provider, thinkingLevel, artifactsCache, projectId } = req.body;
+
+		// Build dynamic SET clause — projectId needs special handling (explicit null clears it)
+		const setClauses = [
+			"title = COALESCE($1, title)",
+			"model_id = COALESCE($2, model_id)",
+			"provider = COALESCE($3, provider)",
+			"thinking_level = COALESCE($4, thinking_level)",
+			"artifacts_cache = COALESCE($6, artifacts_cache)",
+			"last_modified = NOW()",
+		];
+		const params: any[] = [
+			title ?? null,
+			modelId ?? null,
+			provider ?? null,
+			thinkingLevel ?? null,
+			session.id,
+			artifactsCache ? JSON.stringify(artifactsCache) : null,
+		];
+
+		// projectId: undefined = not sent (don't touch), null = clear, string = set
+		if (projectId !== undefined) {
+			params.push(projectId);
+			setClauses.push(`project_id = $${params.length}`);
+		}
 
 		const result = await db.query<SessionRow>(
 			`UPDATE sessions
-			 SET title = COALESCE($1, title),
-			     model_id = COALESCE($2, model_id),
-			     provider = COALESCE($3, provider),
-			     thinking_level = COALESCE($4, thinking_level),
-			     artifacts_cache = COALESCE($6, artifacts_cache),
-			     last_modified = NOW()
+			 SET ${setClauses.join(",\n			     ")}
 			 WHERE id = $5
 			 RETURNING *`,
-			[
-				title ?? null,
-				modelId ?? null,
-				provider ?? null,
-				thinkingLevel ?? null,
-				session.id,
-				artifactsCache ? JSON.stringify(artifactsCache) : null,
-			],
+			params,
 		);
 
 		res.json({ success: true, data: { session: result.rows[0] } });

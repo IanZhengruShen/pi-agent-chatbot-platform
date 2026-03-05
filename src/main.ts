@@ -39,7 +39,10 @@ import {
 	Brain,
 	Calendar,
 	ChevronDown,
+	ChevronRight,
 	FileUp,
+	FolderOpen,
+	FolderPlus,
 	KeyRound,
 	Link,
 	ListTodo,
@@ -47,9 +50,11 @@ import {
 	MessageSquare,
 	PanelLeft,
 	PanelLeftClose,
+	Pencil,
 	Plus,
 	Puzzle,
 	Settings,
+	Sparkles,
 	Square,
 	Trash2,
 	Wrench,
@@ -128,6 +133,14 @@ let agentProfiles: AgentProfileInfo[] = [];
 let currentAgentProfileId: string | undefined;
 let currentModelId: string | undefined;
 let currentProvider: string | undefined;
+
+// Projects (session folders) state
+interface ProjectInfo { id: string; name: string; icon: string | null; sort_order: number; }
+let projects: ProjectInfo[] = [];
+let collapsedProjects = new Set<string>();
+let editingProjectId: string | null = null;
+let moveMenuSessionId: string | null = null;
+let organizingInProgress = false;
 
 // ============================================================================
 // Storage setup (ApiStorageBackend replaces IndexedDB)
@@ -361,6 +374,111 @@ function groupSessionsByDate(sessions: SessionMetadata[]): SessionGroup[] {
 	if (last7Days.length) groups.push({ label: "Last 7 days", sessions: last7Days });
 	if (older.length) groups.push({ label: "Older", sessions: older });
 	return groups;
+}
+
+// ============================================================================
+// Project (folder) helpers
+// ============================================================================
+
+async function fetchProjects(): Promise<void> {
+	try {
+		const res = await fetch("/api/projects", {
+			headers: { Authorization: `Bearer ${authClient.token}` },
+		});
+		if (!res.ok) return;
+		const data = await res.json();
+		if (data.success && Array.isArray(data.data?.projects)) {
+			projects = data.data.projects.map((p: any) => ({
+				id: p.id,
+				name: p.name,
+				icon: p.icon,
+				sort_order: p.sort_order,
+			}));
+			renderApp();
+		}
+	} catch (err) {
+		console.error("Failed to fetch projects:", err);
+	}
+}
+
+async function createProject(name: string): Promise<void> {
+	try {
+		const res = await fetch("/api/projects", {
+			method: "POST",
+			headers: { Authorization: `Bearer ${authClient.token}`, "Content-Type": "application/json" },
+			body: JSON.stringify({ name }),
+		});
+		if (!res.ok) return;
+		await fetchProjects();
+	} catch (err) {
+		console.error("Failed to create project:", err);
+	}
+}
+
+async function renameProject(id: string, name: string): Promise<void> {
+	try {
+		await fetch(`/api/projects/${id}`, {
+			method: "PATCH",
+			headers: { Authorization: `Bearer ${authClient.token}`, "Content-Type": "application/json" },
+			body: JSON.stringify({ name }),
+		});
+		await fetchProjects();
+	} catch (err) {
+		console.error("Failed to rename project:", err);
+	}
+}
+
+async function deleteProject(id: string): Promise<void> {
+	if (!confirm("Delete this project? Sessions will be moved to Ungrouped.")) return;
+	try {
+		await fetch(`/api/projects/${id}`, {
+			method: "DELETE",
+			headers: { Authorization: `Bearer ${authClient.token}` },
+		});
+		await Promise.all([fetchProjects(), loadSidebarSessions()]);
+	} catch (err) {
+		console.error("Failed to delete project:", err);
+	}
+}
+
+async function moveSessionToProject(sessionId: string, projectId: string | null): Promise<void> {
+	moveMenuSessionId = null;
+	try {
+		await fetch(`/api/sessions/${sessionId}`, {
+			method: "PATCH",
+			headers: { Authorization: `Bearer ${authClient.token}`, "Content-Type": "application/json" },
+			body: JSON.stringify({ projectId }),
+		});
+		// Update local metadata cache immediately so sidebar reflects the move
+		const idx = sidebarSessions.findIndex(s => s.id === sessionId);
+		if (idx !== -1) {
+			(sidebarSessions[idx] as any).projectId = projectId;
+		}
+		renderApp();
+	} catch (err) {
+		console.error("Failed to move session:", err);
+	}
+}
+
+async function organizeUngrouped(): Promise<void> {
+	organizingInProgress = true;
+	renderApp();
+	try {
+		const res = await fetch("/api/projects/organize", {
+			method: "POST",
+			headers: { Authorization: `Bearer ${authClient.token}`, "Content-Type": "application/json" },
+		});
+		if (!res.ok) {
+			const data = await res.json().catch(() => ({}));
+			console.error("Organize failed:", data.error);
+		}
+		await Promise.all([fetchProjects(), loadSidebarSessions()]);
+	} catch (err) {
+		console.error("Failed to organize sessions:", err);
+	} finally {
+		organizingInProgress = false;
+		renderApp();
+	}
 }
 
 // ============================================================================
@@ -1017,8 +1135,85 @@ const renderApp = () => {
 		return;
 	}
 
-	// Chat route
-	const sessionGroups = groupSessionsByDate(sidebarSessions);
+	// Chat route — split sessions into project-grouped and ungrouped
+	const projectSessions = new Map<string, SessionMetadata[]>();
+	const ungroupedSessions: SessionMetadata[] = [];
+	for (const s of sidebarSessions) {
+		if (s.projectId) {
+			const arr = projectSessions.get(s.projectId) || [];
+			arr.push(s);
+			projectSessions.set(s.projectId, arr);
+		} else {
+			ungroupedSessions.push(s);
+		}
+	}
+	const ungroupedDateGroups = groupSessionsByDate(ungroupedSessions);
+
+	// Helper: render a single session row
+	const renderSessionRow = (session: SessionMetadata) => {
+		const status = sessionStatusMap.get(session.id);
+		const isGenerating = status === "generating";
+		const isIdle = status === "idle";
+		const isMoveOpen = moveMenuSessionId === session.id;
+		return html`
+		<div
+			class="group flex items-center gap-1 px-2 py-1.5 rounded-md text-sm cursor-pointer transition-colors relative ${session.id === currentSessionId ? "bg-muted font-medium" : "hover:bg-muted/60"}"
+			@click=${() => loadSession(session.id)}
+		>
+			<span class="relative shrink-0">
+				${icon(MessageSquare, "sm")}
+				${isGenerating ? html`<span class="absolute -top-0.5 -right-0.5 w-2 h-2 rounded-full bg-orange-500 animate-pulse"></span>` : nothing}
+				${isIdle ? html`<span class="absolute -top-0.5 -right-0.5 w-2 h-2 rounded-full bg-orange-400"></span>` : nothing}
+			</span>
+			<span class="flex-1 truncate">${session.title || "Untitled"}</span>
+			${isGenerating && session.id !== currentSessionId ? html`
+				<button
+					class="opacity-0 group-hover:opacity-100 p-0.5 rounded hover:bg-orange-500/10 hover:text-orange-500 transition-opacity cursor-pointer"
+					title="Stop generating"
+					@click=${(e: Event) => { e.stopPropagation(); abortSession(session.id); }}
+				>${icon(Square, "sm")}</button>
+			` : nothing}
+			<button
+				class="opacity-0 group-hover:opacity-100 p-0.5 rounded hover:bg-muted transition-opacity cursor-pointer"
+				title="Move to project"
+				@click=${(e: Event) => {
+					e.stopPropagation();
+					moveMenuSessionId = isMoveOpen ? null : session.id;
+					renderApp();
+				}}
+			>${icon(FolderOpen, "sm")}</button>
+			<button
+				class="opacity-0 group-hover:opacity-100 p-0.5 rounded hover:bg-destructive/10 hover:text-destructive transition-opacity cursor-pointer"
+				title="Delete session"
+				@click=${(e: Event) => { e.stopPropagation(); deleteSession(session.id); }}
+			>${icon(Trash2, "sm")}</button>
+			${isMoveOpen ? html`
+				<div class="absolute right-0 top-full z-50 mt-1 w-48 rounded-md border border-border bg-popover shadow-md py-1" @click=${(e: Event) => e.stopPropagation()}>
+					${projects.map(p => html`
+						<button
+							class="w-full text-left px-3 py-1.5 text-xs hover:bg-muted cursor-pointer flex items-center gap-1.5 ${session.projectId === p.id ? "text-muted-foreground" : ""}"
+							@click=${() => moveSessionToProject(session.id, p.id)}
+						>
+							<span>${p.icon || ""}</span>
+							<span class="truncate">${p.name}</span>
+							${session.projectId === p.id ? html`<span class="ml-auto text-muted-foreground">current</span>` : nothing}
+						</button>
+					`)}
+					${session.projectId ? html`
+						<div class="border-t border-border my-1"></div>
+						<button
+							class="w-full text-left px-3 py-1.5 text-xs hover:bg-muted cursor-pointer text-muted-foreground"
+							@click=${() => moveSessionToProject(session.id, null)}
+						>Remove from project</button>
+					` : nothing}
+					${projects.length === 0 ? html`
+						<div class="px-3 py-1.5 text-xs text-muted-foreground">No projects yet</div>
+					` : nothing}
+				</div>
+			` : nothing}
+		</div>
+		`;
+	};
 
 	const appHtml = html`
 		<div class="w-full h-screen flex flex-row bg-background text-foreground overflow-hidden">
@@ -1037,10 +1232,10 @@ const renderApp = () => {
 						})}
 					</div>
 
-					<!-- New session button -->
-					<div class="px-3 py-2">
+					<!-- New session + New project buttons -->
+					<div class="px-3 py-2 flex gap-2">
 						<button
-							class="w-full flex items-center gap-2 px-3 py-2 rounded-md text-sm font-medium border border-border hover:bg-muted transition-colors cursor-pointer"
+							class="flex-1 flex items-center justify-center gap-2 px-3 py-2 rounded-md text-sm font-medium border border-border hover:bg-muted transition-colors cursor-pointer"
 							@click=${() => {
 								clearTimeout(saveSessionTimer);
 								if (currentSessionId && remoteAgent) saveSession();
@@ -1056,53 +1251,123 @@ const renderApp = () => {
 							${icon(Plus, "sm")}
 							<span>New chat</span>
 						</button>
+						<button
+							class="flex items-center justify-center p-2 rounded-md text-sm border border-border hover:bg-muted transition-colors cursor-pointer"
+							title="New project"
+							@click=${() => {
+								const name = prompt("Project name:");
+								if (name?.trim()) createProject(name.trim());
+							}}
+						>
+							${icon(FolderPlus, "sm")}
+						</button>
 					</div>
 
-					<!-- Session list -->
+					<!-- Session list with project folders -->
 					<div class="flex-1 overflow-y-auto px-2 py-1">
-						${sessionGroups.length === 0 ? html`
+						${sidebarSessions.length === 0 ? html`
 							<div class="text-xs text-muted-foreground px-2 py-4 text-center">No sessions yet</div>
-						` : sessionGroups.map((group) => html`
-							<div class="mb-2">
-								<div class="text-xs font-medium text-muted-foreground px-2 py-1">${group.label}</div>
-								${group.sessions.map((session) => {
-									const status = sessionStatusMap.get(session.id);
-									const isGenerating = status === "generating";
-									const isIdle = status === "idle";
-									return html`
+						` : html`
+							<!-- Project folders -->
+							${projects.map(project => {
+								const pSessions = (projectSessions.get(project.id) || [])
+									.sort((a, b) => new Date(b.lastModified || b.createdAt).getTime() - new Date(a.lastModified || a.createdAt).getTime());
+								const isCollapsed = collapsedProjects.has(project.id);
+								const isEditing = editingProjectId === project.id;
+								return html`
+								<div class="mb-1">
 									<div
-										class="group flex items-center gap-1 px-2 py-1.5 rounded-md text-sm cursor-pointer transition-colors ${session.id === currentSessionId ? "bg-muted font-medium" : "hover:bg-muted/60"}"
-										@click=${() => loadSession(session.id)}
+										class="group flex items-center gap-1 px-2 py-1 rounded-md text-xs font-medium text-muted-foreground hover:bg-muted/60 cursor-pointer"
+										@click=${() => {
+											if (isCollapsed) collapsedProjects.delete(project.id);
+											else collapsedProjects.add(project.id);
+											renderApp();
+										}}
 									>
-										<span class="relative shrink-0">
-											${icon(MessageSquare, "sm")}
-											${isGenerating ? html`<span class="absolute -top-0.5 -right-0.5 w-2 h-2 rounded-full bg-orange-500 animate-pulse"></span>` : nothing}
-											${isIdle ? html`<span class="absolute -top-0.5 -right-0.5 w-2 h-2 rounded-full bg-orange-400"></span>` : nothing}
-										</span>
-										<span class="flex-1 truncate">${session.title || "Untitled"}</span>
-										${isGenerating && session.id !== currentSessionId ? html`
+										${isCollapsed ? icon(ChevronRight, "sm") : icon(ChevronDown, "sm")}
+										<span class="shrink-0">${project.icon || ""}</span>
+										${isEditing ? html`
+											<input
+												type="text"
+												class="flex-1 min-w-0 bg-transparent border-b border-primary text-foreground text-xs outline-none"
+												.value=${project.name}
+												@click=${(e: Event) => e.stopPropagation()}
+												@keydown=${(e: KeyboardEvent) => {
+													if (e.key === "Enter") {
+														const val = (e.target as HTMLInputElement).value.trim();
+														if (val) renameProject(project.id, val);
+														editingProjectId = null;
+														renderApp();
+													} else if (e.key === "Escape") {
+														editingProjectId = null;
+														renderApp();
+													}
+												}}
+												@blur=${(e: Event) => {
+													const val = (e.target as HTMLInputElement).value.trim();
+													if (val && val !== project.name) renameProject(project.id, val);
+													editingProjectId = null;
+													renderApp();
+												}}
+											/>
+										` : html`
+											<span class="flex-1 truncate">${project.name}</span>
+											<span class="text-muted-foreground/60 text-[10px]">${pSessions.length}</span>
+										`}
+										${!isEditing ? html`
 											<button
-												class="opacity-0 group-hover:opacity-100 p-0.5 rounded hover:bg-orange-500/10 hover:text-orange-500 transition-opacity cursor-pointer"
-												title="Stop generating"
+												class="opacity-0 group-hover:opacity-100 p-0.5 rounded hover:bg-muted transition-opacity cursor-pointer"
+												title="Rename project"
 												@click=${(e: Event) => {
 													e.stopPropagation();
-													abortSession(session.id);
+													editingProjectId = project.id;
+													renderApp();
+													// Focus input after render
+													requestAnimationFrame(() => {
+														const input = document.querySelector(`aside input[type="text"]`) as HTMLInputElement;
+														if (input) { input.focus(); input.select(); }
+													});
 												}}
-											>
-												${icon(Square, "sm")}
-											</button>
+											>${icon(Pencil, "sm")}</button>
+											<button
+												class="opacity-0 group-hover:opacity-100 p-0.5 rounded hover:bg-destructive/10 hover:text-destructive transition-opacity cursor-pointer"
+												title="Delete project"
+												@click=${(e: Event) => { e.stopPropagation(); deleteProject(project.id); }}
+											>${icon(Trash2, "sm")}</button>
 										` : nothing}
+									</div>
+									${!isCollapsed ? pSessions.map(renderSessionRow) : nothing}
+								</div>
+								`;
+							})}
+
+							<!-- Ungrouped sessions -->
+							${ungroupedSessions.length > 0 ? html`
+								${ungroupedDateGroups.map((group) => html`
+									<div class="mb-2">
+										<div class="text-xs font-medium text-muted-foreground px-2 py-1">${group.label}</div>
+										${group.sessions.map(renderSessionRow)}
+									</div>
+								`)}
+								${ungroupedSessions.length >= 3 ? html`
+									<div class="px-2 py-1">
 										<button
-											class="opacity-0 group-hover:opacity-100 p-0.5 rounded hover:bg-destructive/10 hover:text-destructive transition-opacity cursor-pointer"
-											title="Delete session"
-											@click=${(e: Event) => { e.stopPropagation(); deleteSession(session.id); }}
+											class="w-full flex items-center justify-center gap-1.5 px-2 py-1.5 rounded-md text-xs font-medium text-primary hover:bg-primary/10 transition-colors cursor-pointer border border-dashed border-primary/30"
+											?disabled=${organizingInProgress}
+											@click=${() => organizeUngrouped()}
 										>
-											${icon(Trash2, "sm")}
+											${organizingInProgress ? html`
+												<span class="w-3 h-3 border-2 border-primary/30 border-t-primary rounded-full animate-spin"></span>
+												<span>Organizing...</span>
+											` : html`
+												${icon(Sparkles, "sm")}
+												<span>Organize with AI</span>
+											`}
 										</button>
 									</div>
-								`})}
-							</div>
-						`)}
+								` : nothing}
+							` : nothing}
+						`}
 					</div>
 
 					<!-- Sidebar footer -->
@@ -1411,6 +1676,7 @@ function onAuthSuccess() {
 	connectWebSocket();
 	fetchSkills();
 	fetchAgentProfiles();
+	fetchProjects();
 	loadSidebarSessions();
 	initSessionStatusSSE();
 	renderApp();
@@ -1425,6 +1691,10 @@ function handleLogout() {
 	currentTitle = "";
 	currentAgentProfileId = undefined;
 	agentProfiles = [];
+	projects = [];
+	collapsedProjects.clear();
+	editingProjectId = null;
+	moveMenuSessionId = null;
 	authClient.logout();
 	renderApp();
 }
@@ -1452,6 +1722,7 @@ async function initApp() {
 			connectWebSocket();
 			fetchSkills();
 			fetchAgentProfiles();
+			fetchProjects();
 			loadSidebarSessions();
 			initSessionStatusSSE();
 		} else {

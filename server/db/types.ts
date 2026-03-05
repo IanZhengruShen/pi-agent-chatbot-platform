@@ -47,6 +47,7 @@ export interface SessionRow {
 	artifacts_cache: Record<string, string>;
 	session_status: "generating" | "idle" | "suspended" | "dead";
 	last_status_at: Date;
+	project_id: string | null;
 	deleted_at: Date | null;
 	created_at: Date;
 	last_modified: Date;
@@ -179,6 +180,15 @@ export interface AgentMemoryRow {
 	pinned: boolean;
 	created_at: Date;
 	updated_at: Date;
+}
+
+export interface ProjectRow {
+	id: string;
+	user_id: string;
+	name: string;
+	icon: string | null;
+	sort_order: number;
+	created_at: Date;
 }
 
 export interface AgentProfileRow {
