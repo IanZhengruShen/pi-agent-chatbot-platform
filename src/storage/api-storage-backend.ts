@@ -86,6 +86,7 @@ export class ApiStorageBackend implements StorageBackend {
 						provider: s.provider,
 						thinkingLevel: s.thinking_level,
 						agentProfileId: s.agent_profile_id ?? null,
+						projectId: s.project_id ?? null,
 					});
 				}
 			}
@@ -281,6 +282,7 @@ export class ApiStorageBackend implements StorageBackend {
 				modelId: data.modelId,
 				provider: data.provider,
 				thinkingLevel: data.thinkingLevel,
+				projectId: data.projectId,
 			});
 
 			if (this.knownServerSessions.has(key) || this.pendingCreations.has(key)) {

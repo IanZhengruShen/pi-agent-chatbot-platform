@@ -138,6 +138,9 @@ export interface SessionMetadata {
 	 * Tool calls and tool results are excluded.
 	 */
 	preview: string;
+
+	/** Project/folder ID this session belongs to (null = ungrouped) */
+	projectId?: string | null;
 }
 
 /**

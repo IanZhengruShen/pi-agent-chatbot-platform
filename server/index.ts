@@ -33,6 +33,7 @@ import { createTasksRouter } from "./routes/tasks.js";
 import { createAgentProfilesRouter } from "./routes/agent-profiles.js";
 import { createMemoryRouter } from "./routes/memory.js";
 import { createTeamMembersRouter } from "./routes/team-members.js";
+import { createProjectsRouter } from "./routes/projects.js";
 import { requireAuth } from "./auth/middleware.js";
 import { createCryptoService } from "./services/crypto.js";
 import { ProcessPool } from "./services/process-pool.js";
@@ -178,6 +179,7 @@ async function main() {
 	app.use("/api/agent-profiles", apiRateLimit, createAgentProfilesRouter(agentExecutor));
 	app.use("/api/memory", apiRateLimit, createMemoryRouter());
 	app.use("/api/team-members", apiRateLimit, createTeamMembersRouter());
+	app.use("/api/projects", apiRateLimit, createProjectsRouter(agentExecutor));
 
 	// Read files from the agent's working directory (for rendering artifacts)
 	app.get("/api/agent-files", requireAuth, apiRateLimit, async (req, res) => {
